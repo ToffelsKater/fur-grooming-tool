@@ -1,0 +1,11 @@
+{
+  "name": "com.furgrooming.tool",
+  "version": "1.0.0",
+  "displayName": "Fur Grooming Tool",
+  "description": "Paint fur direction, length, and presence over a UV layout and export liltoon-ready normal/length/alpha textures. Editor-only.",
+  "unity": "2019.4",
+  "author": { "name": "ToffelsKater" },
+  "license": "MIT",
+  "vpmDependencies": {},
+  "keywords": [ "liltoon", "fur", "texture", "normal map", "editor", "avatar" ]
+}
