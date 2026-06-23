@@ -24,6 +24,7 @@ Editor-only, no runtime code. Works with liltoon out of the box, and with any sh
 Open it from the menu: **Tools ▸ Fur Grooming Tool**.
 
 ## Quick start
+https://youtu.be/hLP4zzNyt4g?si=GOuS5RGrwHpL9ePX
 
 1. Drag your UV-layout snapshot into **Background**.
 2. (Optional) drag the avatar's liltoon **material** into **Target material** to auto-assign maps on save.
