@@ -23,6 +23,7 @@ namespace FurGroomingTool
         enum LenMode { Paint, Smudge, Gradient }
         enum AlphaMode { White, Black }
         enum MirrorDir { LeftToRight, RightToLeft, TopToBottom, BottomToTop }
+        enum MarkerShape { Sphere, Cube, Disc, Cross }
 
         // ---- direction layer
         [SerializeField] Vector2[] dir;
@@ -49,6 +50,15 @@ namespace FurGroomingTool
         [SerializeField] Tab tab = Tab.Direction;
         [SerializeField] Texture2D bg;
         [SerializeField] Material targetMat;
+        [SerializeField] Renderer targetRenderer;
+        [SerializeField] bool showOnMesh = false;
+        [SerializeField] MarkerShape markerShape = MarkerShape.Sphere;
+        [SerializeField] Color markerColor = new Color(1f, 0.7f, 0.2f, 1f);
+        [SerializeField] float markerSize = 0.06f;
+        [SerializeField] bool followCam = false;
+        [SerializeField] bool alignToNormal = false;
+        [SerializeField] float camDistance = 0.35f;
+        [SerializeField] float fov = 60f;
         [SerializeField] string normalProp = "_FurVectorTex";
         [SerializeField] string lengthProp = "_FurLengthMask";
         [SerializeField] string alphaProp = "_FurMask";
@@ -73,6 +83,11 @@ namespace FurGroomingTool
         Vector2 gradStart, gradEnd;
         bool gradActive;
         float canvasSize = REF;
+        Vector3[] meshVerts; Vector2[] meshUVs; Vector3[] meshNorms; int[] meshTris; bool meshSkinned;
+        readonly System.Collections.Generic.List<Vector3> sceneHits = new System.Collections.Generic.List<Vector3>();
+        readonly System.Collections.Generic.List<Vector3> sceneNormals = new System.Collections.Generic.List<Vector3>();
+        [SerializeField] bool foldBrush = true, foldTool = true, foldSym = false, foldExport = false, foldScene = false;
+        Vector2 settingsScroll;
 
         [MenuItem("Tools/Fur Grooming Tool")]
         static void Open() => GetWindow<FurGroomingWindow>("Fur Grooming");
@@ -86,13 +101,28 @@ namespace FurGroomingTool
             if (lenBuf == null || lenBuf.Length != MN * MN) lenBuf = new float[MN * MN];
             if (alphaBuf == null || alphaBuf.Length != MN * MN) alphaBuf = new float[MN * MN];
             maskDirty = true;
+            SceneView.duringSceneGui += OnSceneGUI;
+            if (targetRenderer != null) CacheMesh();
+        }
+
+        void OnDisable()
+        {
+            SceneView.duringSceneGui -= OnSceneGUI;
         }
 
         // =========================================================== GUI
 
         void OnGUI()
         {
-            DrawToolbar();
+            Tab nt = (Tab)GUILayout.Toolbar((int)tab, new[] { "Direction", "Length", "Alpha" });
+            if (nt != tab) { tab = nt; maskDirty = true; }
+
+            float maxSettings = Mathf.Min(position.height * 0.5f, 400f);
+            settingsScroll = EditorGUILayout.BeginScrollView(settingsScroll, GUILayout.MaxHeight(maxSettings));
+            DrawSettings();
+            EditorGUILayout.EndScrollView();
+
+            DrawActions();
             EditorGUILayout.Space(4);
             ClampView();
 
@@ -120,51 +150,104 @@ namespace FurGroomingTool
             HandleInput(paint);
         }
 
-        void DrawToolbar()
+        static bool Foldout(bool state, string title) => EditorGUILayout.Foldout(state, title, true);
+
+        void DrawSettings()
         {
-            Tab nt = (Tab)GUILayout.Toolbar((int)tab, new[] { "Direction", "Length", "Alpha" });
-            if (nt != tab) { tab = nt; maskDirty = true; }
-
-            EditorGUILayout.BeginHorizontal();
-            bg = (Texture2D)EditorGUILayout.ObjectField("Background", bg, typeof(Texture2D), false);
-            if (ColorButton("Clear layer", colRed, GUILayout.Width(90))) ClearLayer();
-            EditorGUILayout.EndHorizontal();
-
-            targetMat = (Material)EditorGUILayout.ObjectField("Target material", targetMat, typeof(Material), false);
-
-            brushSize = EditorGUILayout.IntSlider("Brush size", brushSize, 2, 200);
-            brushFlow = EditorGUILayout.Slider("Brush flow", brushFlow, 0.02f, 1f);
-            bgOpacity = EditorGUILayout.Slider("BG opacity", bgOpacity, 0f, 1f);
-            exportRes = EditorGUILayout.IntPopup("Export resolution", exportRes,
-                new[] { "512", "1024", "2048", "4096" }, new[] { 512, 1024, 2048, 4096 });
-
-            EditorGUILayout.BeginHorizontal();
-            outputFolder = EditorGUILayout.TextField(new GUIContent("Output folder", "Maps save here (inside Assets) and overwrite existing files. Leave blank to be asked each time."), outputFolder);
-            if (ColorButton("Browse", colGray, GUILayout.Width(70))) BrowseOutputFolder();
-            EditorGUILayout.EndHorizontal();
-            baseName = EditorGUILayout.TextField(new GUIContent("File base name", "Saved as <base>_Normal / _Length / _Alpha .png"), baseName);
-
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Mirror", GUILayout.Width(45));
-            mirrorDir = (MirrorDir)EditorGUILayout.EnumPopup(mirrorDir, GUILayout.Width(120));
-            symAxis = EditorGUILayout.Slider("Axis", symAxis, 0f, 1f);
-            if (ColorButton("Apply mirror", colPurple, GUILayout.Width(110))) ApplyMirror();
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.BeginHorizontal();
-            zoom = EditorGUILayout.Slider("Zoom", zoom, 1f, 16f);
-            if (ColorButton("Reset view", colGray, GUILayout.Width(90))) { zoom = 1f; panCenter = new Vector2(0.5f, 0.5f); }
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.Space(4);
-            switch (tab)
+            foldBrush = Foldout(foldBrush, "Canvas & brush");
+            if (foldBrush)
             {
-                case Tab.Direction: DrawDirectionControls(); break;
-                case Tab.Length: DrawLengthControls(); break;
-                case Tab.Alpha: DrawAlphaControls(); break;
+                EditorGUI.indentLevel++;
+                EditorGUILayout.BeginHorizontal();
+                bg = (Texture2D)EditorGUILayout.ObjectField("Background", bg, typeof(Texture2D), false);
+                if (ColorButton("Clear layer", colRed, GUILayout.Width(90))) ClearLayer();
+                EditorGUILayout.EndHorizontal();
+                targetMat = (Material)EditorGUILayout.ObjectField("Target material", targetMat, typeof(Material), false);
+                EditorGUILayout.BeginHorizontal();
+                Renderer rendNew = (Renderer)EditorGUILayout.ObjectField(new GUIContent("Mesh (renderer)", "The exact mesh to read UVs from and to highlight in the Scene view. Drag the avatar's mesh object from the Hierarchy."), targetRenderer, typeof(Renderer), true);
+                if (rendNew != targetRenderer) { targetRenderer = rendNew; CacheMesh(); if (targetRenderer != null) GenerateUvBackground(); }
+                if (ColorButton("Refresh UV", colTeal, GUILayout.Width(90))) GenerateUvBackground();
+                EditorGUILayout.EndHorizontal();
+                brushSize = EditorGUILayout.IntSlider("Brush size", brushSize, 2, 200);
+                brushFlow = EditorGUILayout.Slider("Brush flow", brushFlow, 0.02f, 1f);
+                bgOpacity = EditorGUILayout.Slider("BG opacity", bgOpacity, 0f, 1f);
+                EditorGUILayout.BeginHorizontal();
+                zoom = EditorGUILayout.Slider("Zoom", zoom, 1f, 16f);
+                if (ColorButton("Reset view", colGray, GUILayout.Width(90))) { zoom = 1f; panCenter = new Vector2(0.5f, 0.5f); }
+                EditorGUILayout.EndHorizontal();
+                EditorGUI.indentLevel--;
             }
 
-            EditorGUILayout.Space(4);
+            foldTool = Foldout(foldTool, "Tool  -  " + tab);
+            if (foldTool)
+            {
+                EditorGUI.indentLevel++;
+                switch (tab)
+                {
+                    case Tab.Direction: DrawDirectionControls(); break;
+                    case Tab.Length: DrawLengthControls(); break;
+                    case Tab.Alpha: DrawAlphaControls(); break;
+                }
+                EditorGUI.indentLevel--;
+            }
+
+            foldSym = Foldout(foldSym, "Symmetry / mirror");
+            if (foldSym)
+            {
+                EditorGUI.indentLevel++;
+                mirrorDir = (MirrorDir)EditorGUILayout.EnumPopup("Mirror direction", mirrorDir);
+                symAxis = EditorGUILayout.Slider("Axis", symAxis, 0f, 1f);
+                if (ColorButton("Apply mirror", colPurple, GUILayout.Width(120))) ApplyMirror();
+                EditorGUI.indentLevel--;
+            }
+
+            foldExport = Foldout(foldExport, "Export");
+            if (foldExport)
+            {
+                EditorGUI.indentLevel++;
+                exportRes = EditorGUILayout.IntPopup("Resolution", exportRes,
+                    new[] { "512", "1024", "2048", "4096" }, new[] { 512, 1024, 2048, 4096 });
+                EditorGUILayout.BeginHorizontal();
+                outputFolder = EditorGUILayout.TextField(new GUIContent("Output folder", "Maps save here (inside Assets) and overwrite existing files. Leave blank to be asked each time."), outputFolder);
+                if (ColorButton("Browse", colGray, GUILayout.Width(70))) BrowseOutputFolder();
+                EditorGUILayout.EndHorizontal();
+                baseName = EditorGUILayout.TextField(new GUIContent("File base name", "Saved as <base>_Normal / _Length / _Alpha .png"), baseName);
+                EditorGUI.indentLevel--;
+            }
+
+            foldScene = Foldout(foldScene, "Scene view preview");
+            if (foldScene)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.BeginHorizontal();
+                showOnMesh = EditorGUILayout.ToggleLeft("Show on mesh", showOnMesh, GUILayout.Width(120));
+                if (ColorButton("Refresh mesh", colGray, GUILayout.Width(100))) CacheMesh();
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.LabelField("Mesh is set in 'Canvas & brush'.", EditorStyles.miniLabel);
+                if (showOnMesh)
+                {
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField("Marker", GUILayout.Width(45));
+                    markerShape = (MarkerShape)EditorGUILayout.EnumPopup(markerShape, GUILayout.Width(80));
+                    markerColor = EditorGUILayout.ColorField(markerColor, GUILayout.Width(60));
+                    markerSize = EditorGUILayout.Slider(markerSize, 0.01f, 0.3f);
+                    EditorGUILayout.EndHorizontal();
+                    followCam = EditorGUILayout.ToggleLeft("Camera follows brush (smoothed)", followCam);
+                    if (followCam)
+                    {
+                        EditorGUI.indentLevel++;
+                        alignToNormal = EditorGUILayout.ToggleLeft("Align to surface normal", alignToNormal);
+                        camDistance = EditorGUILayout.Slider("Distance (zoom)", camDistance, 0.02f, 3f);
+                        fov = EditorGUILayout.Slider("Field of view", fov, 10f, 90f);
+                        EditorGUI.indentLevel--;
+                    }
+                }
+                EditorGUI.indentLevel--;
+            }
+        }
+
+        void DrawActions()
+        {
             string saveLabel = tab == Tab.Direction ? "Save normal map" : tab == Tab.Length ? "Save length mask" : "Save alpha mask";
             EditorGUILayout.BeginHorizontal();
             if (tab == Tab.Direction && ColorButton("Generate preview", colAmber)) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
@@ -325,6 +408,12 @@ namespace FurGroomingTool
             if (e.type == EventType.ContextClick && inside) { e.Use(); return; }
 
             Vector2 uv = RectToUv(m, r);
+
+            if (showOnMesh)
+            {
+                if (inside && (e.type == EventType.MouseMove || e.type == EventType.MouseDrag || e.type == EventType.MouseDown)) UpdateSceneHit(uv);
+                else if (e.type == EventType.MouseLeaveWindow && sceneHits.Count > 0) { sceneHits.Clear(); SceneView.RepaintAll(); }
+            }
 
             if (e.type == EventType.MouseDown && (e.button == 0 || e.button == 1) && inside)
             {
@@ -815,6 +904,162 @@ namespace FurGroomingTool
         {
             if (t != null && t.width == size) return;
             t = new Texture2D(size, size, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
+        }
+
+        // =========================================================== mesh highlight
+
+        void CacheMesh()
+        {
+            meshVerts = null; meshUVs = null; meshNorms = null; meshTris = null; meshSkinned = false;
+            sceneHits.Clear(); sceneNormals.Clear();
+            if (targetRenderer == null) return;
+            Mesh m = null;
+            var smr = targetRenderer as SkinnedMeshRenderer;
+            if (smr != null) { m = new Mesh(); smr.BakeMesh(m); meshSkinned = true; }
+            else { var mf = targetRenderer.GetComponent<MeshFilter>(); if (mf != null) m = mf.sharedMesh; }
+            if (m == null) return;
+            meshVerts = m.vertices; meshUVs = m.uv; meshNorms = m.normals; meshTris = m.triangles;
+        }
+
+        // Render the mesh's UV islands into a wireframe texture and use it as the background.
+        void GenerateUvBackground()
+        {
+            Mesh m = FindUvMesh();
+            if (m == null)
+            {
+                EditorUtility.DisplayDialog("Fur Grooming Tool",
+                    "Assign the mesh's renderer in 'Mesh (renderer)' first (drag the avatar's mesh object from the Hierarchy).", "OK");
+                return;
+            }
+            Vector2[] uvs = m.uv; int[] tris = m.triangles;
+            if (uvs == null || uvs.Length == 0)
+            {
+                EditorUtility.DisplayDialog("Fur Grooming Tool", "That mesh has no UV map.", "OK");
+                return;
+            }
+            const int size = 1024;
+            var px = new Color32[size * size]; // transparent background; canvas dark shows through
+            Color32 col = new Color32(210, 210, 210, 255);
+            for (int i = 0; i < tris.Length; i += 3)
+            {
+                Vector2 a = uvs[tris[i]], b = uvs[tris[i + 1]], c = uvs[tris[i + 2]];
+                DrawLinePx(px, size, size, a, b, col);
+                DrawLinePx(px, size, size, b, c, col);
+                DrawLinePx(px, size, size, c, a, col);
+            }
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
+            tex.SetPixels32(px); tex.Apply();
+            bg = tex;
+            Repaint();
+        }
+
+        Mesh FindUvMesh()
+        {
+            if (targetRenderer == null) return null;
+            var s = targetRenderer as SkinnedMeshRenderer;
+            if (s != null) return s.sharedMesh;
+            var f = targetRenderer.GetComponent<MeshFilter>();
+            return f != null ? f.sharedMesh : null;
+        }
+
+        static void DrawLinePx(Color32[] px, int w, int h, Vector2 ua, Vector2 ub, Color32 col)
+        {
+            int x0 = Mathf.RoundToInt(ua.x * (w - 1)), y0 = Mathf.RoundToInt(ua.y * (h - 1));
+            int x1 = Mathf.RoundToInt(ub.x * (w - 1)), y1 = Mathf.RoundToInt(ub.y * (h - 1));
+            int dx = Mathf.Abs(x1 - x0), dy = -Mathf.Abs(y1 - y0);
+            int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+            int err = dx + dy;
+            while (true)
+            {
+                if ((uint)x0 < (uint)w && (uint)y0 < (uint)h) px[y0 * w + x0] = col;
+                if (x0 == x1 && y0 == y1) break;
+                int e2 = 2 * err;
+                if (e2 >= dy) { err += dy; x0 += sx; }
+                if (e2 <= dx) { err += dx; y0 += sy; }
+            }
+        }
+
+        // Map the brush UV to every matching spot on the mesh (symmetric/overlapping
+        // UVs yield several hits) and store world positions for the Scene view marker.
+        void UpdateSceneHit(Vector2 toolUv)
+        {
+            sceneHits.Clear(); sceneNormals.Clear();
+            if (showOnMesh && targetRenderer != null && meshVerts != null && meshUVs != null && meshUVs.Length > 0)
+            {
+                Vector2 q = new Vector2(toolUv.x, 1f - toolUv.y); // tool y is top-down; mesh V is bottom-up
+                Transform t = targetRenderer.transform;
+                Matrix4x4 mtx = meshSkinned ? Matrix4x4.TRS(t.position, t.rotation, Vector3.one) : targetRenderer.localToWorldMatrix;
+                bool hasN = meshNorms != null && meshNorms.Length == meshVerts.Length;
+                for (int i = 0; i < meshTris.Length; i += 3)
+                {
+                    int a = meshTris[i], b = meshTris[i + 1], c = meshTris[i + 2];
+                    if (Bary(q, meshUVs[a], meshUVs[b], meshUVs[c], out float wa, out float wb, out float wc))
+                    {
+                        Vector3 local = meshVerts[a] * wa + meshVerts[b] * wb + meshVerts[c] * wc;
+                        sceneHits.Add(mtx.MultiplyPoint3x4(local));
+                        if (hasN)
+                        {
+                            Vector3 ln = meshNorms[a] * wa + meshNorms[b] * wb + meshNorms[c] * wc;
+                            Vector3 wn = meshSkinned ? t.rotation * ln : targetRenderer.localToWorldMatrix.MultiplyVector(ln);
+                            sceneNormals.Add(wn.sqrMagnitude > 1e-9f ? wn.normalized : Vector3.up);
+                        }
+                        else sceneNormals.Add(Vector3.zero);
+                        if (sceneHits.Count >= 16) break;
+                    }
+                }
+            }
+            FollowCamera();
+            SceneView.RepaintAll();
+        }
+
+        void OnSceneGUI(SceneView sv)
+        {
+            if (!showOnMesh || sceneHits.Count == 0) return;
+            Vector3 cam = sv.camera != null ? sv.camera.transform.position : Vector3.zero;
+            Handles.color = markerColor;
+            for (int i = 0; i < sceneHits.Count; i++)
+            {
+                Vector3 p = sceneHits[i];
+                float s = HandleUtility.GetHandleSize(p) * markerSize;
+                Vector3 n = (cam - p).sqrMagnitude > 1e-6f ? (cam - p).normalized : Vector3.up;
+                switch (markerShape)
+                {
+                    case MarkerShape.Sphere: Handles.SphereHandleCap(0, p, Quaternion.identity, s * 2f, EventType.Repaint); break;
+                    case MarkerShape.Cube: Handles.CubeHandleCap(0, p, Quaternion.identity, s * 2f, EventType.Repaint); break;
+                    case MarkerShape.Disc: Handles.DrawSolidDisc(p, n, s); break;
+                    case MarkerShape.Cross:
+                        float c = s * 1.6f;
+                        Handles.DrawLine(p - Vector3.right * c, p + Vector3.right * c);
+                        Handles.DrawLine(p - Vector3.up * c, p + Vector3.up * c);
+                        Handles.DrawLine(p - Vector3.forward * c, p + Vector3.forward * c);
+                        break;
+                }
+            }
+        }
+
+        void FollowCamera()
+        {
+            if (!followCam || sceneHits.Count == 0) return;
+            SceneView sv = SceneView.lastActiveSceneView;
+            if (sv == null) return;
+            Quaternion rot = sv.rotation;
+            if (alignToNormal && sceneNormals.Count > 0 && sceneNormals[0].sqrMagnitude > 1e-6f)
+                rot = Quaternion.LookRotation(-sceneNormals[0], Vector3.up);
+            sv.cameraSettings.fieldOfView = fov;
+            sv.LookAt(sceneHits[0], rot, camDistance, sv.orthographic, false); // instant:false = smoothed
+        }
+
+        static bool Bary(Vector2 p, Vector2 a, Vector2 b, Vector2 c, out float wa, out float wb, out float wc)
+        {
+            Vector2 v0 = b - a, v1 = c - a, v2 = p - a;
+            float den = v0.x * v1.y - v1.x * v0.y;
+            wa = wb = wc = 0f;
+            if (Mathf.Abs(den) < 1e-12f) return false;
+            wb = (v2.x * v1.y - v1.x * v2.y) / den;
+            wc = (v0.x * v2.y - v2.x * v0.y) / den;
+            wa = 1f - wb - wc;
+            const float e = -0.0005f;
+            return wa >= e && wb >= e && wc >= e;
         }
     }
 }
