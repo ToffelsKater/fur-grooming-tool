@@ -58,6 +58,8 @@ namespace FurGroomingTool
         [SerializeField] float bgOpacity = 0.6f;
         [SerializeField] float smoothRadius = 4f;
         [SerializeField] int exportRes = 1024;
+        [SerializeField] string outputFolder = "Assets";
+        [SerializeField] string baseName = "Fur";
         [SerializeField] MirrorDir mirrorDir = MirrorDir.LeftToRight;
         [SerializeField] float symAxis = 0.5f;
         [SerializeField] float zoom = 1f;
@@ -135,6 +137,12 @@ namespace FurGroomingTool
             bgOpacity = EditorGUILayout.Slider("BG opacity", bgOpacity, 0f, 1f);
             exportRes = EditorGUILayout.IntPopup("Export resolution", exportRes,
                 new[] { "512", "1024", "2048", "4096" }, new[] { 512, 1024, 2048, 4096 });
+
+            EditorGUILayout.BeginHorizontal();
+            outputFolder = EditorGUILayout.TextField(new GUIContent("Output folder", "Maps save here (inside Assets) and overwrite existing files. Leave blank to be asked each time."), outputFolder);
+            if (ColorButton("Browse", colGray, GUILayout.Width(70))) BrowseOutputFolder();
+            EditorGUILayout.EndHorizontal();
+            baseName = EditorGUILayout.TextField(new GUIContent("File base name", "Saved as <base>_Normal / _Length / _Alpha .png"), baseName);
 
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("Mirror", GUILayout.Width(45));
@@ -605,15 +613,26 @@ namespace FurGroomingTool
 
         void SaveCurrent()
         {
-            if (tab == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), "FurNormal", true, normalProp);
-            else if (tab == Tab.Length) SaveTexture(BuildMaskTex(exportRes, lenBuf, false), "FurLength", false, lengthProp);
-            else SaveTexture(BuildMaskTex(exportRes, alphaBuf, true), "FurAlpha", false, alphaProp);
+            string b = string.IsNullOrEmpty(baseName) ? "Fur" : baseName;
+            if (tab == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), b + "_Normal", true, normalProp);
+            else if (tab == Tab.Length) SaveTexture(BuildMaskTex(exportRes, lenBuf, false), b + "_Length", false, lengthProp);
+            else SaveTexture(BuildMaskTex(exportRes, alphaBuf, true), b + "_Alpha", false, alphaProp);
         }
 
         void SaveTexture(Texture2D tex, string name, bool normal, string prop)
         {
-            string path = EditorUtility.SaveFilePanelInProject("Save " + name, name, "png", "Choose a location inside Assets");
-            if (string.IsNullOrEmpty(path)) { Object.DestroyImmediate(tex); return; }
+            string path;
+            if (!string.IsNullOrEmpty(outputFolder) && IsInsideAssets(outputFolder))
+            {
+                string folder = outputFolder.Replace('\\', '/').TrimEnd('/');
+                if (!System.IO.Directory.Exists(folder)) System.IO.Directory.CreateDirectory(folder);
+                path = folder + "/" + name + ".png"; // overwrites if it already exists
+            }
+            else
+            {
+                path = EditorUtility.SaveFilePanelInProject("Save " + name, name, "png", "Choose a location inside Assets");
+                if (string.IsNullOrEmpty(path)) { Object.DestroyImmediate(tex); return; }
+            }
             File.WriteAllBytes(path, tex.EncodeToPNG());
             Object.DestroyImmediate(tex);
             AssetDatabase.ImportAsset(path);
@@ -688,6 +707,31 @@ namespace FurGroomingTool
             bool clicked = GUILayout.Button(label, opts);
             GUI.backgroundColor = prev;
             return clicked;
+        }
+
+        void BrowseOutputFolder()
+        {
+            string start = !string.IsNullOrEmpty(outputFolder) && System.IO.Directory.Exists(outputFolder) ? outputFolder : Application.dataPath;
+            string picked = EditorUtility.OpenFolderPanel("Choose output folder (inside Assets)", start, "");
+            if (string.IsNullOrEmpty(picked)) return;
+            string rel = AbsoluteToProject(picked);
+            if (rel != null) outputFolder = rel;
+            else EditorUtility.DisplayDialog("Fur Grooming Tool", "Please pick a folder inside this project's Assets folder.", "OK");
+        }
+
+        static bool IsInsideAssets(string p)
+        {
+            p = p.Replace('\\', '/');
+            return p == "Assets" || p.StartsWith("Assets/");
+        }
+
+        static string AbsoluteToProject(string abs)
+        {
+            abs = abs.Replace('\\', '/');
+            string data = Application.dataPath.Replace('\\', '/');
+            if (abs == data) return "Assets";
+            if (abs.StartsWith(data + "/")) return "Assets" + abs.Substring(data.Length);
+            return null;
         }
 
         float ViewSize => 1f / zoom;
