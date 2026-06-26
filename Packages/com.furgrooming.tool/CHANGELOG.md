@@ -2,6 +2,11 @@
 
 All notable changes to this package are documented here.
 
+## [1.0.3] - 2026-06-22
+### Added
+- Undo / redo: Ctrl+Z, Ctrl+Y (or Ctrl+Shift+Z), and toolbar buttons. One step per stroke and per operation (clear, fill, smooth, mirror, load); snapshots only the layers that change. History is per session.
+- Load mask: import an existing grayscale image into the Length or Alpha buffer to keep editing it (round-trips with the exported PNG).
+
 ## [1.0.2] - 2026-06-22
 ### Added
 - Scene-view brush highlight: shows the brush position on the assigned mesh in the Scene view, marking every match (handles symmetric/overlapping UVs). Adjustable marker shape, color, and size.

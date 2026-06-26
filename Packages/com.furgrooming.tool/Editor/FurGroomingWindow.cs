@@ -88,6 +88,10 @@ namespace FurGroomingTool
         readonly System.Collections.Generic.List<Vector3> sceneNormals = new System.Collections.Generic.List<Vector3>();
         [SerializeField] bool foldBrush = true, foldTool = true, foldSym = false, foldExport = false, foldScene = false;
         Vector2 settingsScroll;
+        class Snapshot { public Vector2[] dir; public float[] dirStr, len, alpha; }
+        const int MaxUndo = 30;
+        readonly System.Collections.Generic.List<Snapshot> undoStack = new System.Collections.Generic.List<Snapshot>();
+        readonly System.Collections.Generic.List<Snapshot> redoStack = new System.Collections.Generic.List<Snapshot>();
 
         [MenuItem("Tools/Fur Grooming Tool")]
         static void Open() => GetWindow<FurGroomingWindow>("Fur Grooming");
@@ -114,6 +118,7 @@ namespace FurGroomingTool
 
         void OnGUI()
         {
+            HandleShortcuts();
             Tab nt = (Tab)GUILayout.Toolbar((int)tab, new[] { "Direction", "Length", "Alpha" });
             if (nt != tab) { tab = nt; maskDirty = true; }
 
@@ -250,12 +255,18 @@ namespace FurGroomingTool
         {
             string saveLabel = tab == Tab.Direction ? "Save normal map" : tab == Tab.Length ? "Save length mask" : "Save alpha mask";
             EditorGUILayout.BeginHorizontal();
+            using (new EditorGUI.DisabledScope(undoStack.Count == 0)) { if (ColorButton("Undo", colGray, GUILayout.Width(60))) DoUndo(); }
+            using (new EditorGUI.DisabledScope(redoStack.Count == 0)) { if (ColorButton("Redo", colGray, GUILayout.Width(60))) DoRedo(); }
             if (tab == Tab.Direction && ColorButton("Generate preview", colAmber)) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
             if (ColorButton(saveLabel, colGreen)) SaveCurrent();
             if (tab == Tab.Direction)
             {
                 if (ColorButton("Save groom", colBlue)) SaveGroom();
                 if (ColorButton("Load groom", colTeal)) LoadGroom();
+            }
+            else if (ColorButton("Load mask", colTeal))
+            {
+                LoadMask(tab == Tab.Length ? lenBuf : alphaBuf);
             }
             EditorGUILayout.EndHorizontal();
         }
@@ -283,7 +294,7 @@ namespace FurGroomingTool
             EditorGUILayout.BeginHorizontal();
             smoothRadius = EditorGUILayout.Slider("Smooth radius", smoothRadius, 1f, 24f);
             if (ColorButton("Smooth all", colAmber, GUILayout.Width(90)))
-            { SmoothBuffer(lenBuf, MN, smoothRadius); maskDirty = true; }
+            { PushUndoActive(); SmoothBuffer(lenBuf, MN, smoothRadius); maskDirty = true; }
             EditorGUILayout.EndHorizontal();
             lengthProp = EditorGUILayout.TextField("Length property", lengthProp);
         }
@@ -292,8 +303,8 @@ namespace FurGroomingTool
         {
             alphaMode = (AlphaMode)GUILayout.Toolbar((int)alphaMode, new[] { "Paint white (fur)", "Paint black (bald)" });
             EditorGUILayout.BeginHorizontal();
-            if (ColorButton("Fill white", new Color(0.95f, 0.95f, 0.95f))) { Fill(alphaBuf, 1f); maskDirty = true; }
-            if (ColorButton("Fill black", new Color(0.45f, 0.45f, 0.45f))) { Fill(alphaBuf, 0f); maskDirty = true; }
+            if (ColorButton("Fill white", new Color(0.95f, 0.95f, 0.95f))) { PushUndoActive(); Fill(alphaBuf, 1f); maskDirty = true; }
+            if (ColorButton("Fill black", new Color(0.45f, 0.45f, 0.45f))) { PushUndoActive(); Fill(alphaBuf, 0f); maskDirty = true; }
             EditorGUILayout.EndHorizontal();
             alphaThreshold = EditorGUILayout.Slider("Threshold", alphaThreshold, 0.05f, 0.95f);
             alphaAA = EditorGUILayout.ToggleLeft("Soft 1px edge (anti-alias)", alphaAA);
@@ -418,6 +429,7 @@ namespace FurGroomingTool
             if (e.type == EventType.MouseDown && (e.button == 0 || e.button == 1) && inside)
             {
                 paintErase = e.button == 1;
+                PushUndoActive();
                 if (tab == Tab.Length && lenMode == LenMode.Gradient && !paintErase)
                 { gradActive = true; gradStart = gradEnd = uv; }
                 else { painting = true; lastUv = uv; Stroke(uv, uv); }
@@ -579,6 +591,7 @@ namespace FurGroomingTool
 
         void ClearLayer()
         {
+            PushUndoActive();
             if (tab == Tab.Direction) { System.Array.Clear(dir, 0, dir.Length); System.Array.Clear(dirStr, 0, dirStr.Length); }
             else if (tab == Tab.Length) System.Array.Clear(lenBuf, 0, lenBuf.Length);
             else System.Array.Clear(alphaBuf, 0, alphaBuf.Length);
@@ -586,6 +599,59 @@ namespace FurGroomingTool
         }
 
         void Fill(float[] buf, float v) { for (int i = 0; i < buf.Length; i++) buf[i] = v; }
+
+        // ---- undo / redo (snapshots only the layer(s) an op touches)
+        void HandleShortcuts()
+        {
+            Event e = Event.current;
+            if (e.type != EventType.KeyDown || !(e.control || e.command)) return;
+            if (e.keyCode == KeyCode.Z) { if (e.shift) DoRedo(); else DoUndo(); e.Use(); }
+            else if (e.keyCode == KeyCode.Y) { DoRedo(); e.Use(); }
+        }
+
+        Snapshot Capture(bool d, bool l, bool a)
+        {
+            var s = new Snapshot();
+            if (d) { s.dir = (Vector2[])dir.Clone(); s.dirStr = (float[])dirStr.Clone(); }
+            if (l) s.len = (float[])lenBuf.Clone();
+            if (a) s.alpha = (float[])alphaBuf.Clone();
+            return s;
+        }
+
+        void ApplySnapshot(Snapshot s)
+        {
+            if (s.dir != null) { System.Array.Copy(s.dir, dir, dir.Length); System.Array.Copy(s.dirStr, dirStr, dirStr.Length); }
+            if (s.len != null) System.Array.Copy(s.len, lenBuf, lenBuf.Length);
+            if (s.alpha != null) System.Array.Copy(s.alpha, alphaBuf, alphaBuf.Length);
+            if (s.dir != null && normalPreview != null) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
+            maskDirty = true; Repaint();
+        }
+
+        void PushUndo(bool d, bool l, bool a)
+        {
+            undoStack.Add(Capture(d, l, a));
+            while (undoStack.Count > MaxUndo) undoStack.RemoveAt(0);
+            redoStack.Clear();
+        }
+
+        void PushUndoActive() => PushUndo(tab == Tab.Direction, tab == Tab.Length, tab == Tab.Alpha);
+        void PushUndoAll() => PushUndo(true, true, true);
+
+        void DoUndo()
+        {
+            if (undoStack.Count == 0) return;
+            Snapshot s = undoStack[undoStack.Count - 1]; undoStack.RemoveAt(undoStack.Count - 1);
+            redoStack.Add(Capture(s.dir != null, s.len != null, s.alpha != null));
+            ApplySnapshot(s);
+        }
+
+        void DoRedo()
+        {
+            if (redoStack.Count == 0) return;
+            Snapshot s = redoStack[redoStack.Count - 1]; redoStack.RemoveAt(redoStack.Count - 1);
+            undoStack.Add(Capture(s.dir != null, s.len != null, s.alpha != null));
+            ApplySnapshot(s);
+        }
 
         void SmoothBuffer(float[] buf, int res, float radius)
         {
@@ -765,6 +831,7 @@ namespace FurGroomingTool
         {
             string p = EditorUtility.OpenFilePanel("Load groom data", "", "bytes");
             if (string.IsNullOrEmpty(p)) return;
+            PushUndoAll();
             using (var r = new BinaryReader(File.Open(p, FileMode.Open)))
             {
                 if (r.ReadInt32() != FN || r.ReadInt32() != MN) { Debug.LogError("[Fur] Groom resolution mismatch."); return; }
@@ -773,6 +840,27 @@ namespace FurGroomingTool
                 for (int i = 0; i < MN * MN; i++) alphaBuf[i] = r.ReadSingle();
             }
             maskDirty = true; Repaint();
+        }
+
+        // Import a grayscale image into a mask buffer (reads the red channel).
+        // Oriented to round-trip with the exported PNG (buffer row 0 = top = V=1).
+        void LoadMask(float[] buf)
+        {
+            string p = EditorUtility.OpenFilePanelWithFilters("Load mask image", Application.dataPath,
+                new[] { "Image", "png,jpg,jpeg,tga,bmp", "All files", "*" });
+            if (string.IsNullOrEmpty(p)) return;
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!tex.LoadImage(File.ReadAllBytes(p))) { Object.DestroyImmediate(tex); Debug.LogError("[Fur] Could not load image: " + p); return; }
+            PushUndoActive();
+            for (int y = 0; y < MN; y++)
+            {
+                float v = 1f - y / (float)(MN - 1);
+                for (int x = 0; x < MN; x++)
+                    buf[y * MN + x] = tex.GetPixelBilinear(x / (float)(MN - 1), v).r;
+            }
+            Object.DestroyImmediate(tex);
+            maskDirty = true; Repaint();
+            Debug.Log("[Fur] Loaded mask <- " + p);
         }
 
         // =========================================================== helpers
@@ -856,6 +944,7 @@ namespace FurGroomingTool
         // so the flow stays symmetric; masks are plain value copies.
         void ApplyMirror()
         {
+            PushUndoAll();
             bool isX = mirrorDir == MirrorDir.LeftToRight || mirrorDir == MirrorDir.RightToLeft;
             bool sourceLow = mirrorDir == MirrorDir.LeftToRight || mirrorDir == MirrorDir.TopToBottom;
             MirrorBakeDir(isX, sourceLow);
