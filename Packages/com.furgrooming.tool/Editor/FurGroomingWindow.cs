@@ -18,7 +18,7 @@ namespace FurGroomingTool
         const int MN = 512;   // mask buffer resolution
         const float REF = 512f;
 
-        enum Tab { Direction, Length, Alpha }
+        enum Tab { Direction, Length, Alpha, Collision }
         enum DirMode { DirStrength, Direction, Strength, Pinch, Erase }
         enum LenMode { Paint, Smudge, Gradient }
         enum AlphaMode { White, Black }
@@ -75,7 +75,20 @@ namespace FurGroomingTool
         [SerializeField] float zoom = 1f;
         [SerializeField] Vector2 panCenter = new Vector2(0.5f, 0.5f);
 
+        // ---- collision resolver
+        [SerializeField] System.Collections.Generic.List<Renderer> clothing = new System.Collections.Generic.List<Renderer>();
+        [SerializeField] FurOcclusionSettings occl = new FurOcclusionSettings();
+        [SerializeField] bool debugDraw = true, debugChangedOnly = true;
+        [SerializeField] int debugBudget = 600;
+        [SerializeField] string resolveMsg = "";
+        [SerializeField] Vector2[] preDir; [SerializeField] float[] preDirStr, preLen, preAlpha;
+        [SerializeField] bool hasPreResolve;
+
         // ---- runtime
+        readonly System.Collections.Generic.List<FurHairDebug> resolveDebug = new System.Collections.Generic.List<FurHairDebug>();
+        FurCoverage coverage;
+        Texture2D coverageTex, normalMaskTex;
+        Vector2 collideScroll;
         Texture2D normalPreview, lenTex, alphaTex;
         bool maskDirty = true;
         bool painting, panning, paintErase;
@@ -104,6 +117,8 @@ namespace FurGroomingTool
             if (dirStr == null || dirStr.Length != FN * FN) dirStr = new float[FN * FN];
             if (lenBuf == null || lenBuf.Length != MN * MN) lenBuf = new float[MN * MN];
             if (alphaBuf == null || alphaBuf.Length != MN * MN) alphaBuf = new float[MN * MN];
+            if (clothing == null) clothing = new System.Collections.Generic.List<Renderer>();
+            if (occl == null) occl = new FurOcclusionSettings();
             maskDirty = true;
             SceneView.duringSceneGui += OnSceneGUI;
             if (targetRenderer != null) CacheMesh();
@@ -119,8 +134,10 @@ namespace FurGroomingTool
         void OnGUI()
         {
             HandleShortcuts();
-            Tab nt = (Tab)GUILayout.Toolbar((int)tab, new[] { "Direction", "Length", "Alpha" });
+            Tab nt = (Tab)GUILayout.Toolbar((int)tab, new[] { "Direction", "Length", "Alpha", "Collision" });
             if (nt != tab) { tab = nt; maskDirty = true; }
+
+            if (tab == Tab.Collision) { DrawCollisionTab(); return; }
 
             float maxSettings = Mathf.Min(position.height * 0.5f, 400f);
             settingsScroll = EditorGUILayout.BeginScrollView(settingsScroll, GUILayout.MaxHeight(maxSettings));
@@ -255,8 +272,7 @@ namespace FurGroomingTool
         {
             string saveLabel = tab == Tab.Direction ? "Save normal map" : tab == Tab.Length ? "Save length mask" : "Save alpha mask";
             EditorGUILayout.BeginHorizontal();
-            using (new EditorGUI.DisabledScope(undoStack.Count == 0)) { if (ColorButton("Undo", colGray, GUILayout.Width(60))) DoUndo(); }
-            using (new EditorGUI.DisabledScope(redoStack.Count == 0)) { if (ColorButton("Redo", colGray, GUILayout.Width(60))) DoRedo(); }
+            DrawUndoButtons();
             if (tab == Tab.Direction && ColorButton("Generate preview", colAmber)) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
             if (ColorButton(saveLabel, colGreen)) SaveCurrent();
             if (tab == Tab.Direction)
@@ -309,6 +325,217 @@ namespace FurGroomingTool
             alphaThreshold = EditorGUILayout.Slider("Threshold", alphaThreshold, 0.05f, 0.95f);
             alphaAA = EditorGUILayout.ToggleLeft("Soft 1px edge (anti-alias)", alphaAA);
             alphaProp = EditorGUILayout.TextField("Alpha property", alphaProp);
+        }
+
+        // =========================================================== collision tab
+
+        // Self-contained: only what the resolver needs, and the three maps it writes.
+        // No brush, no canvas, no export settings.
+        void DrawCollisionTab()
+        {
+            float listH = Mathf.Min(position.height * 0.55f, 460f);
+            collideScroll = EditorGUILayout.BeginScrollView(collideScroll, GUILayout.MaxHeight(listH));
+            DrawResolverSettings();
+            EditorGUILayout.EndScrollView();
+
+            EditorGUILayout.BeginHorizontal();
+            DrawUndoButtons();
+            if (ColorButton("Resolve", colGreen)) RunResolve();
+            using (new EditorGUI.DisabledScope(!hasPreResolve))
+                if (ColorButton("Revert", colRed, GUILayout.Width(80))) RevertResolve();
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            if (ColorButton("Save normal map", colBlue)) SaveMap(Tab.Direction);
+            if (ColorButton("Save length mask", colBlue)) SaveMap(Tab.Length);
+            if (ColorButton("Save alpha mask", colBlue)) SaveMap(Tab.Alpha);
+            EditorGUILayout.EndHorizontal();
+
+            if (!string.IsNullOrEmpty(resolveMsg))
+                EditorGUILayout.LabelField(resolveMsg, EditorStyles.wordWrappedMiniLabel);
+
+            EditorGUILayout.Space(4);
+            DrawResolverPreviews();
+        }
+
+        void DrawResolverSettings()
+        {
+            EditorGUILayout.LabelField(
+                "Measures how much of the sky above each spot on the body the outfit blocks, then leans the fur " +
+                "over and trims it until it fits in the room that is left. Both meshes are read in their current " +
+                "pose, so pose the avatar first.", EditorStyles.wordWrappedMiniLabel);
+
+            EditorGUILayout.Space(2);
+            Renderer rendNew = (Renderer)EditorGUILayout.ObjectField(new GUIContent("Fur mesh",
+                "The mesh the fur grows on. Same renderer as on the paint tabs."), targetRenderer, typeof(Renderer), true);
+            if (rendNew != targetRenderer) { targetRenderer = rendNew; CacheMesh(); }
+
+            EditorGUILayout.LabelField("Clothing meshes");
+            EditorGUI.indentLevel++;
+            for (int i = 0; i < clothing.Count; i++)
+            {
+                EditorGUILayout.BeginHorizontal();
+                clothing[i] = (Renderer)EditorGUILayout.ObjectField(clothing[i], typeof(Renderer), true);
+                if (ColorButton("-", colRed, GUILayout.Width(24))) { clothing.RemoveAt(i); i--; }
+                EditorGUILayout.EndHorizontal();
+            }
+            EditorGUILayout.BeginHorizontal();
+            if (ColorButton("Add slot", colGray, GUILayout.Width(90))) clothing.Add(null);
+            if (ColorButton("Add selected", colTeal, GUILayout.Width(110))) AddSelectedClothing();
+            if (clothing.Count > 0 && ColorButton("Clear list", colRed, GUILayout.Width(90))) clothing.Clear();
+            EditorGUILayout.EndHorizontal();
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.Space(4);
+            occl.furLengthMm = EditorGUILayout.FloatField(new GUIContent("Fur length (mm)",
+                "World length of a hair where the length mask is fully white. Match your shader, or the shadow is measured over the wrong distance."),
+                occl.furLengthMm);
+            occl.clothThicknessMm = EditorGUILayout.FloatField(new GUIContent("Cloth thickness (mm)",
+                "Fattens the clothing in every direction. Raise it if fur slips through thin or badly fitted garments."),
+                occl.clothThicknessMm);
+            occl.lengthMarginMm = EditorGUILayout.FloatField(new GUIContent("Length margin (mm)",
+                "Slack kept between the fur tip and the clothing. Raise it if fur is clean in the editor but pokes through once the body moves."),
+                occl.lengthMarginMm);
+
+            EditorGUILayout.Space(2);
+            occl.rayQuality = EditorGUILayout.IntPopup("Ray quality", occl.rayQuality,
+                new[] { "Fast (11 rays)", "Medium (25 rays)", "Fine (55 rays)" }, new[] { 0, 1, 2 });
+            occl.maxTiltAngle = EditorGUILayout.Slider(new GUIContent("Max tilt angle",
+                "Hard cap on how far a hair may lean from the surface normal. Also limited by the Direction tab's own cap."),
+                occl.maxTiltAngle, 0f, 90f);
+            if (occl.maxTiltAngle > maxAngle)
+                EditorGUILayout.HelpBox("The normal map can only encode " + maxAngle.ToString("0") +
+                    "° (Direction tab), so the resolver stops there.", MessageType.Info);
+            occl.shadowThreshold = EditorGUILayout.Slider(new GUIContent("Shadow threshold",
+                "How shadowed a spot must be before its fur is touched at all."), occl.shadowThreshold, 0f, 0.9f);
+            occl.combStrength = EditorGUILayout.Slider(new GUIContent("Comb into open space",
+                "How hard the fur is steered towards where there is still room. 0 keeps your groom and only shortens."),
+                occl.combStrength, 0f, 1f);
+            occl.smoothPasses = EditorGUILayout.IntSlider(new GUIContent("Smooth result",
+                "3x3 blur passes over the texels the resolver touched."), occl.smoothPasses, 0, 4);
+            occl.writeAlpha = EditorGUILayout.ToggleLeft(new GUIContent("Culled fur -> alpha black",
+                "Punch fully trimmed fur out of the alpha mask, so no shell is drawn there at all."), occl.writeAlpha);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.BeginHorizontal();
+            occl.collectDebug = EditorGUILayout.ToggleLeft(new GUIContent("Debug hairs",
+                "Green: surface normal.  Blue: fur as groomed.  Red: after resolving."), occl.collectDebug, GUILayout.Width(95));
+            debugDraw = EditorGUILayout.ToggleLeft("Show in Scene", debugDraw, GUILayout.Width(105));
+            debugChangedOnly = EditorGUILayout.ToggleLeft("Changed only", debugChangedOnly, GUILayout.Width(105));
+            EditorGUILayout.EndHorizontal();
+            debugBudget = EditorGUILayout.IntSlider("Debug hair count", debugBudget, 50, 4000);
+        }
+
+        // Coverage plus the three maps the resolver writes, side by side.
+        void DrawResolverPreviews()
+        {
+            if (Event.current.type == EventType.Repaint && maskDirty) RebuildMaskTex();
+            if (normalMaskTex == null) normalMaskTex = BuildNormalTex(256);
+
+            Rect area = GUILayoutUtility.GetRect(10, 10, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            const float pad = 6f, capH = 15f;
+            float w = (area.width - pad * 3f) / 4f;
+            float h = Mathf.Min(w, Mathf.Max(60f, area.height - capH));
+            var names = new[] { "Coverage", "Normal", "Length", "Alpha" };
+            var maps = new[] { coverageTex, normalMaskTex, lenTex, alphaTex };
+
+            for (int i = 0; i < 4; i++)
+            {
+                Rect r = new Rect(area.x + i * (w + pad), area.y, w, h);
+                EditorGUI.DrawRect(r, new Color(0.13f, 0.13f, 0.15f));
+                if (maps[i] != null) GUI.DrawTexture(r, maps[i], ScaleMode.ScaleToFit);
+                else GUI.Label(new Rect(r.x, r.y + r.height * 0.5f - 8f, r.width, 16f),
+                               i == 0 ? "run Resolve" : "-", EditorStyles.centeredGreyMiniLabel);
+                GUI.Label(new Rect(r.x, r.yMax + 1f, w, capH), names[i], EditorStyles.miniLabel);
+            }
+        }
+
+        void AddSelectedClothing()
+        {
+            foreach (GameObject go in Selection.gameObjects)
+                foreach (Renderer r in go.GetComponentsInChildren<Renderer>())
+                    if ((r is SkinnedMeshRenderer || r.GetComponent<MeshFilter>() != null) && !clothing.Contains(r))
+                        clothing.Add(r);
+        }
+
+        void RunResolve()
+        {
+            if (targetRenderer == null)
+            { EditorUtility.DisplayDialog("Fur Grooming Tool", "Assign the fur mesh first.", "OK"); return; }
+            var cloth = new System.Collections.Generic.List<Renderer>();
+            foreach (Renderer r in clothing) if (r != null && !cloth.Contains(r)) cloth.Add(r);
+            if (cloth.Count == 0)
+            { EditorUtility.DisplayDialog("Fur Grooming Tool", "Add at least one clothing renderer.", "OK"); return; }
+
+            preDir = (Vector2[])dir.Clone(); preDirStr = (float[])dirStr.Clone();
+            preLen = (float[])lenBuf.Clone(); preAlpha = (float[])alphaBuf.Clone();
+            hasPreResolve = true;
+            PushUndoAll();
+
+            coverage = new FurCoverage();
+            FurOcclusionReport rep = FurOcclusionResolver.Resolve(
+                targetRenderer, cloth, dir, dirStr, FN, lenBuf, occl.writeAlpha ? alphaBuf : null, MN,
+                maxAngle, flipG, occl, coverage, resolveDebug);
+
+            resolveMsg = rep.Summary();
+            if (rep.error != null)
+            {
+                hasPreResolve = false;
+                EditorUtility.DisplayDialog("Fur Grooming Tool", rep.error, "OK");
+                return;
+            }
+            Debug.Log("[Fur] " + resolveMsg);
+            if (coverageTex != null) DestroyImmediate(coverageTex);
+            coverageTex = FurOcclusionResolver.CoverageTexture(coverage);
+            RefreshResolverMaps();
+        }
+
+        void RevertResolve()
+        {
+            if (!hasPreResolve) return;
+            System.Array.Copy(preDir, dir, dir.Length);
+            System.Array.Copy(preDirStr, dirStr, dirStr.Length);
+            System.Array.Copy(preLen, lenBuf, lenBuf.Length);
+            System.Array.Copy(preAlpha, alphaBuf, alphaBuf.Length);
+            hasPreResolve = false;
+            resolveDebug.Clear();
+            if (coverageTex != null) { DestroyImmediate(coverageTex); coverageTex = null; }
+            coverage = null;
+            resolveMsg = "Reverted to the groom from before the last resolve.";
+            RefreshResolverMaps();
+        }
+
+        void RefreshResolverMaps()
+        {
+            if (normalMaskTex != null) DestroyImmediate(normalMaskTex);
+            normalMaskTex = BuildNormalTex(256);
+            if (normalPreview != null) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
+            maskDirty = true;
+            Repaint(); SceneView.RepaintAll();
+        }
+
+        // Same read as the reference tool's debug mode.
+        void DrawResolverDebug()
+        {
+            if (!debugDraw || resolveDebug.Count == 0) return;
+            int total = resolveDebug.Count;
+            int wanted = Mathf.Min(debugBudget, total);
+            int stride = Mathf.Max(1, total / Mathf.Max(1, wanted));
+            int drawn = 0;
+            for (int i = 0; i < total && drawn < wanted; i += stride)
+            {
+                FurHairDebug hd = resolveDebug[i];
+                if (debugChangedOnly && hd.state <= 1) continue;
+                drawn++;
+                float nl = Mathf.Max(1e-4f, hd.before.magnitude) * 0.5f;
+                Handles.color = new Color(0.3f, 1f, 0.3f, 0.7f);
+                Handles.DrawLine(hd.root, hd.root + hd.normal * nl);
+                Handles.color = new Color(0.45f, 0.8f, 1f, 0.9f);
+                Handles.DrawLine(hd.root, hd.root + hd.before);
+                Handles.color = new Color(1f, 0.3f, 0.25f, 0.95f);
+                if (hd.after.sqrMagnitude > 1e-10f) Handles.DrawLine(hd.root, hd.root + hd.after);
+                else Handles.DrawSolidDisc(hd.root, hd.normal, nl * 0.12f);
+            }
         }
 
         // =========================================================== drawing
@@ -600,6 +827,14 @@ namespace FurGroomingTool
 
         void Fill(float[] buf, float v) { for (int i = 0; i < buf.Length; i++) buf[i] = v; }
 
+        void DrawUndoButtons()
+        {
+            using (new EditorGUI.DisabledScope(undoStack.Count == 0))
+                if (ColorButton("Undo", colGray, GUILayout.Width(60))) DoUndo();
+            using (new EditorGUI.DisabledScope(redoStack.Count == 0))
+                if (ColorButton("Redo", colGray, GUILayout.Width(60))) DoRedo();
+        }
+
         // ---- undo / redo (snapshots only the layer(s) an op touches)
         void HandleShortcuts()
         {
@@ -634,7 +869,11 @@ namespace FurGroomingTool
             redoStack.Clear();
         }
 
-        void PushUndoActive() => PushUndo(tab == Tab.Direction, tab == Tab.Length, tab == Tab.Alpha);
+        void PushUndoActive()
+        {
+            if (tab == Tab.Collision) PushUndoAll();
+            else PushUndo(tab == Tab.Direction, tab == Tab.Length, tab == Tab.Alpha);
+        }
         void PushUndoAll() => PushUndo(true, true, true);
 
         void DoUndo()
@@ -766,12 +1005,14 @@ namespace FurGroomingTool
 
         // =========================================================== save
 
-        void SaveCurrent()
+        void SaveCurrent() { SaveMap(tab); }
+
+        void SaveMap(Tab which)
         {
             string b = string.IsNullOrEmpty(baseName) ? "Fur" : baseName;
-            if (tab == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), b + "_Normal", true, normalProp);
-            else if (tab == Tab.Length) SaveTexture(BuildMaskTex(exportRes, lenBuf, false), b + "_Length", false, lengthProp);
-            else SaveTexture(BuildMaskTex(exportRes, alphaBuf, true), b + "_Alpha", false, alphaProp);
+            if (which == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), b + "_Normal", true, normalProp);
+            else if (which == Tab.Length) SaveTexture(BuildMaskTex(exportRes, lenBuf, false), b + "_Length", false, lengthProp);
+            else if (which == Tab.Alpha) SaveTexture(BuildMaskTex(exportRes, alphaBuf, true), b + "_Alpha", false, alphaProp);
         }
 
         void SaveTexture(Texture2D tex, string name, bool normal, string prop)
@@ -1103,6 +1344,7 @@ namespace FurGroomingTool
 
         void OnSceneGUI(SceneView sv)
         {
+            DrawResolverDebug();
             if (!showOnMesh || sceneHits.Count == 0) return;
             Vector3 cam = sv.camera != null ? sv.camera.transform.position : Vector3.zero;
             Handles.color = markerColor;
