@@ -30,20 +30,83 @@ Open the tool from the menu: **Tools ▸ Fur Grooming Tool**.
 1. Drag your UV-layout snapshot into **Background**.
 2. (Optional) drag the avatar's liltoon **material** into **Target material** to auto-assign maps on save.
 3. Pick a tab and paint:
-   - **Left-drag** paints. **Right-drag** paints black / erases. **Scroll** to zoom (cursor-anchored). **Middle-drag** to pan.
+   - **Left-drag** paints. **Right-drag** marks black (or erases, on the bottom layer / with Shift). **Scroll** to zoom (cursor-anchored). **Middle-drag** to pan.
    - **Direction** — drag to comb. `Pinch` converges a tuft to a point; `Direction` / `Strength` / `Erase` edit one channel.
-   - **Length** — `Paint` (soft, builds gradients via flow + hardness), `Smudge` (melts edges smooth), `Gradient` (drag a line for a root→tip ramp). `Smooth all` blurs the whole mask.
+   - **Length** — `Paint` (soft, builds gradients via flow + hardness), `Smudge` (melts edges smooth), `Gradient` (drag a line for a root→tip ramp). `Fill white` / `Fill black` fill the selected layer, `Smooth layer` blurs it.
    - **Alpha** — `Paint white` / `Paint black` hard brushes, `Fill white` / `Fill black`, `Threshold` + soft-edge toggle for crisp cutouts (paw pads, under clothing).
-4. **Symmetry** — paint one side, choose the **Mirror** direction + axis, then **Apply mirror** to copy it across. Direction vectors are flipped correctly across the axis.
-5. **Save … map** (green button) writes a PNG into `/Assets` with the correct import settings (Normal map / linear grayscale, sRGB off) and assigns it to the material property if one is set.
-6. **Save groom / Load groom** (Direction tab) stores all three layers in a groom file (`.bytes`) so you can resume later.
+4. **Layers** (Length and Alpha tabs) — paint onto a stack instead of one flat mask, so an idea can be tried and then kept or dropped on its own. See below.
+5. **Symmetry** — paint one side, choose the **Mirror** direction + axis, then **Apply mirror** to copy it across. Direction vectors are flipped correctly across the axis; every layer is mirrored.
+6. **Save … map** (green button) writes a PNG into `/Assets` with the correct import settings (Normal map / linear grayscale, sRGB off) and assigns it to the material property if one is set.
+7. **Save groom / Load groom** (Direction tab) stores the direction field and both layer stacks in a groom file (`.bytes`) so you can resume later. Groom files written by 1.0.x still load, into a single base layer per mask.
+
+## Paint layers
+
+The **Length** and **Alpha** masks are layer stacks. Painting goes to the selected layer only;
+the tool composites bottom to top and everything downstream — the canvas, the output preview, the
+exported PNG and the collision resolver's input — reads that composite, so what you see is what is
+written.
+
+| Control | What it does |
+|---|---|
+| Add / Duplicate / Delete | Adds above the selection, copies it, or removes it. The **bottom** layer cannot be deleted — it is the foundation the mask composites onto. Move another layer below it first if you really want it gone. |
+| Up / Down | Moves the selected layer through the stack. |
+| **Show** (checkbox) | Includes the layer in the mask. Several can be ticked at once — they stack. Hiding and showing again restores the composite exactly. Hide them all and the mask is empty; the panel says so. |
+| **Paint** (radio) | The one layer the brush writes into. |
+| Name | Rename freely; generated layers show their name in bold and cannot be painted on. |
+| Blend | `Normal` replaces what is below, `Min` only ever darkens it, `Max` only ever brightens it. |
+| Opacity | Fades the whole layer. `0` is an exact no-op, `1` an exact replace. |
+
+Each layer holds a **coverage** channel next to its value — how much of the layer is actually
+painted. That is what lets a mask layer tell "painted black" apart from "not painted", and it is
+what an erase edits: lifting coverage reveals the layers below rather than stamping black over them.
+
+### Marks versus holes
+
+This is the one thing worth getting straight, because it is easy to get backwards:
+
+- **Painting** makes a **mark** — it covers the layer, so it shows over everything below it.
+- **Right-drag** also makes a **mark**, of the "away" value (black / zero), on every layer above the
+  bottom one. A hole there would only show the layer below, which is usually painted too, so the
+  erase would read as nothing at all.
+- **On the bottom layer**, right-drag makes a **hole** — there is nothing underneath, where a hole
+  and a black mark come out identical anyway.
+- **Shift + right-drag** forces a real hole on any layer. That is how you take a mark back off a
+  layer and let the one below show through.
+
+Whole-canvas operations (`Fill white` / `Fill black`, `Gradient`, `Load mask`) take the layer
+**solid**: covered edge to edge. A solid layer hides every layer below it, so erasing a hole in it
+reveals nothing but black unless the layer underneath is painted at that spot. Two solid layers
+with a hole erased in each therefore cancel out — each one plugs the other's hole, and you see no
+holes at all. The panel warns when a layer is solid and something below it is being blocked.
+
+The workflow that stacks properly: keep **one** solid layer at the bottom (`Fill white`), leave the
+layers above it **empty**, and paint only the marks you want onto them — `Paint black (bald)` on
+the Alpha tab, or any value on the Length tab. Then each layer can be shown and hidden on its own.
+
+If you have already filled several layers and erased into them, **`Holes -> marks`** repairs it in
+one click: it turns the selected layer inside out, keeping only what you erased as black marks and
+going transparent everywhere else. The panel offers the same button by name in its warning. Each
+layer still shows and hides independently afterwards. It is unavailable on the bottom layer, where
+inverting would throw away the fill everything else sits on — move that layer up first if you
+really mean to.
+
+**`Merge shown`** flattens every shown layer into one, exactly as the mask composites, and leaves
+hidden layers where they are.
+
+Direction stays a single flat field: blending two vector fields raises questions this tool does not
+need to answer.
 
 ## Fur collision resolver
 
 Keeps groomed fur out of clothing, on its own **Collision** tab. Assign the fur mesh, add the
-clothing renderers, press **Resolve**. It edits the Direction and Length layers (and the Alpha
-mask, if you let it) in place, so you can keep painting afterwards, export from the tab's own save
-buttons, `Ctrl+Z` it, or press **Revert**.
+clothing renderers, press **Resolve**.
+
+The result lands on **its own layer** in each mask — a `Min` layer whose coverage is exactly the
+texels the resolve changed. So the tab's **Show resolve layer** toggle turns the resolve on and off
+instantly against your untouched groom, the slider fades it, and **Drop layer** removes it. Running
+Resolve again rewrites that one layer and nothing else. Your hand-painted length and alpha work is
+never overwritten. The Direction field is still edited in place, so `Ctrl+Z` and **Revert** remain
+the way back for that.
 
 ### How it works
 

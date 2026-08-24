@@ -28,13 +28,14 @@ https://youtu.be/hLP4zzNyt4g?si=GOuS5RGrwHpL9ePX
 
 1. Drag your UV-layout snapshot into **Background**.
 2. (Optional) drag the avatar's liltoon **material** into **Target material** to auto-assign maps on save.
-3. Paint: **left-drag** paints, **right-drag** erases / paints black, **scroll** to zoom (cursor-anchored), **middle-drag** to pan.
+3. Paint: **left-drag** paints, **right-drag** marks black (on the bottom layer, or with Shift, it erases instead), **scroll** to zoom (cursor-anchored), **middle-drag** to pan.
    - **Direction** — drag to comb. `Pinch` converges a tuft; `Direction` / `Strength` / `Erase` edit one channel.
-   - **Length** — `Paint` (soft gradient buildup), `Smudge`, `Gradient` (drag a root→tip ramp), `Smooth all`.
+   - **Length** — `Paint` (soft gradient buildup), `Smudge`, `Gradient` (drag a root→tip ramp), `Fill white` / `Fill black`, `Smooth layer`.
    - **Alpha** — hard `Paint white` / `Paint black`, `Fill`, `Threshold` for crisp cutouts (paw pads, under clothing).
-4. **Symmetry** — paint one side, set **Mirror** + axis, then **Apply mirror** (direction vectors are flipped correctly).
-5. **Save … map** writes a PNG into `/Assets` with correct import settings (Normal map / linear grayscale, sRGB off) and assigns it to the material if one is set.
-6. **Save groom / Load groom** stores all three layers so you can resume later.
+4. **Layers** — the Length and Alpha masks are layer stacks: add, reorder, hide, fade, and blend (`Normal` / `Min` / `Max`). Painting only ever touches the selected layer; right-drag marks black so it stacks, and Shift + right-drag erases through to the layers below.
+5. **Symmetry** — paint one side, set **Mirror** + axis, then **Apply mirror** (direction vectors are flipped correctly).
+6. **Save … map** writes a PNG into `/Assets` with correct import settings (Normal map / linear grayscale, sRGB off) and assigns it to the material if one is set.
+7. **Save groom / Load groom** stores the direction field and both layer stacks so you can resume later.
 
 See the [package README](Packages/com.furgrooming.tool/README.md) for full details.
 

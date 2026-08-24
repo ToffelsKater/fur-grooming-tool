@@ -4,6 +4,46 @@ All notable changes to this package are documented here.
 
 ## [Unreleased]
 ### Added
+- **Paint layers on the Length and Alpha tabs.** A small Photoshop-style stack: add, duplicate, delete,
+  reorder, rename, show/hide, opacity, and a blend mode per layer (Normal / Min / Max). Painting goes to the
+  selected layer, so work can be tried, kept or dropped without disturbing what is underneath. Direction stays
+  a single flat field.
+- Each layer carries a coverage channel beside its value, which is what lets a mask layer tell "painted black"
+  apart from "not painted".
+- The layer rows carry column headers, and the two per-row controls are now visually distinct: a **Show**
+  checkbox for whether a layer is in the mask (any number may be ticked), and a **Paint** radio for the single
+  layer the brush writes into. The selected row is highlighted, and the panel warns when every layer is hidden.
+- The panel also warns when a layer is painted edge to edge at full opacity, since it then hides every layer
+  below it - two filled layers with an erased hole in each cancel out, which is otherwise a puzzling thing to
+  run into. `Fill`, `Gradient` and `Load mask` all take a layer solid; the README explains marks versus holes.
+- **`Holes -> marks`** repairs exactly that stack in one click: it turns the selected layer inside out, keeping
+  only what was erased as black marks and going transparent elsewhere, so every layer shows at once and each
+  still toggles on its own. The warning offers the same button by name.
+- **`Merge shown`** flattens the shown layers into one, exactly as the mask composites; hidden layers are kept.
+- `Fill white` and `Fill black` on the Length tab, matching the Alpha tab: they fill the selected layer solid.
+- The bottom layer cannot be deleted - it is the foundation the mask composites onto, and losing it would
+  silently drop everything the layers above are painted over. Reorder to move a layer out of the bottom slot
+  if it really has to go; a generated resolver layer stays droppable wherever it sits.
+- **The occlusion resolver now owns a layer.** A resolve writes only that layer, with the exact texels it
+  changed as its coverage and Min as its blend, so it can be hidden, faded or dropped without touching the
+  groom below - and re-running rewrites nothing else. Show/hide/opacity/drop controls sit on the Collision tab.
+- Groom files gained a v2 format that stores the whole stack. Files written by 1.0.x still load, into a single
+  base layer per mask.
+### Changed
+- **Right-drag on the Length and Alpha tabs now lays down a black mark** on any layer above the bottom one, so
+  it stacks over the layers below instead of cutting a hole that shows a layer which is usually painted too.
+  On the bottom layer - where a hole and a black mark composite identically, nothing being underneath - it
+  stays a true erase that lifts coverage. **Shift + right-drag** forces a real hole anywhere, which is how a
+  mark is taken back off a layer.
+- `Holes -> marks` is unavailable on the bottom layer, since inverting that one throws away the fill every
+  other layer sits on.
+- Export, the material preview and the resolver's input all read the composite, so what is saved is what is
+  shown. The Collision tab's Length and Alpha previews now refresh together instead of leaving one stale.
+- Undo snapshots the edited layer for a stroke or a whole-canvas op, and the whole stack only for operations
+  that change the stack itself (mirror, resolve, load, add/delete/reorder).
+- Mirror applies to every layer of both masks, mirroring coverage along with the value.
+- "Smooth all" is now "Smooth layer" and blurs coverage alongside the value, so the painted region's edge
+  softens with it.
 - **Fur occlusion resolver**, on its own **Collision** tab: keeps groomed fur out of clothing by measuring the
   outfit's shadow on the body. A fan of rays over the hemisphere at each texel gives how shadowed the spot is,
   how much clear headroom it has, and which way there is still room; the fur is then leaned over just far enough

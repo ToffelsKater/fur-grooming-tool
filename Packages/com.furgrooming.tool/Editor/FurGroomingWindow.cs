@@ -36,12 +36,12 @@ namespace FurGroomingTool
         [SerializeField] bool showArrows = true;
 
         // ---- length layer
-        [SerializeField] float[] lenBuf;
+        [SerializeField] MaskLayerStack lenStack = new MaskLayerStack();
         [SerializeField] LenMode lenMode = LenMode.Paint;
         [SerializeField] float lenValue = 1f;
 
         // ---- alpha layer
-        [SerializeField] float[] alphaBuf;
+        [SerializeField] MaskLayerStack alphaStack = new MaskLayerStack();
         [SerializeField] AlphaMode alphaMode = AlphaMode.White;
         [SerializeField] float alphaThreshold = 0.5f;
         [SerializeField] bool alphaAA = true;
@@ -81,7 +81,8 @@ namespace FurGroomingTool
         [SerializeField] bool debugDraw = true, debugChangedOnly = true;
         [SerializeField] int debugBudget = 600;
         [SerializeField] string resolveMsg = "";
-        [SerializeField] Vector2[] preDir; [SerializeField] float[] preDirStr, preLen, preAlpha;
+        [SerializeField] Vector2[] preDir; [SerializeField] float[] preDirStr;
+        [SerializeField] MaskLayerStack preLenStack, preAlphaStack;
         [SerializeField] bool hasPreResolve;
 
         // ---- runtime
@@ -91,7 +92,7 @@ namespace FurGroomingTool
         Vector2 collideScroll;
         Texture2D normalPreview, lenTex, alphaTex;
         bool maskDirty = true;
-        bool painting, panning, paintErase;
+        bool painting, panning, paintErase, forceHoleErase;
         Vector2 lastUv, lastDir = Vector2.right;
         Vector2 gradStart, gradEnd;
         bool gradActive;
@@ -99,9 +100,15 @@ namespace FurGroomingTool
         Vector3[] meshVerts; Vector2[] meshUVs; Vector3[] meshNorms; int[] meshTris; bool meshSkinned;
         readonly System.Collections.Generic.List<Vector3> sceneHits = new System.Collections.Generic.List<Vector3>();
         readonly System.Collections.Generic.List<Vector3> sceneNormals = new System.Collections.Generic.List<Vector3>();
-        [SerializeField] bool foldBrush = true, foldTool = true, foldSym = false, foldExport = false, foldScene = false;
+        [SerializeField] bool foldBrush = true, foldTool = true, foldLayers = true, foldSym = false, foldExport = false, foldScene = false;
         Vector2 settingsScroll;
-        class Snapshot { public Vector2[] dir; public float[] dirStr, len, alpha; }
+
+        // Undo grain: a brush stroke or a whole-canvas op touches one layer, so only that
+        // layer's two channels are kept. Ops that change the stack itself (mirror, resolve,
+        // load, add/delete/reorder) keep a deep clone instead.
+        enum Cap { None, Layer, Whole }
+        class StackSnap { public int index = -1; public float[] value; public byte[] cover; public MaskLayerStack whole; }
+        class Snapshot { public Vector2[] dir; public float[] dirStr; public StackSnap len, alpha; }
         const int MaxUndo = 30;
         readonly System.Collections.Generic.List<Snapshot> undoStack = new System.Collections.Generic.List<Snapshot>();
         readonly System.Collections.Generic.List<Snapshot> redoStack = new System.Collections.Generic.List<Snapshot>();
@@ -115,8 +122,10 @@ namespace FurGroomingTool
             minSize = new Vector2(620, 720);
             if (dir == null || dir.Length != FN * FN) dir = new Vector2[FN * FN];
             if (dirStr == null || dirStr.Length != FN * FN) dirStr = new float[FN * FN];
-            if (lenBuf == null || lenBuf.Length != MN * MN) lenBuf = new float[MN * MN];
-            if (alphaBuf == null || alphaBuf.Length != MN * MN) alphaBuf = new float[MN * MN];
+            if (lenStack == null) lenStack = new MaskLayerStack();
+            if (alphaStack == null) alphaStack = new MaskLayerStack();
+            lenStack.Ensure(MN * MN, "Base");
+            alphaStack.Ensure(MN * MN, "Base");
             if (clothing == null) clothing = new System.Collections.Generic.List<Renderer>();
             if (occl == null) occl = new FurOcclusionSettings();
             maskDirty = true;
@@ -127,6 +136,32 @@ namespace FurGroomingTool
         void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
+        }
+
+        // ---- layer access
+        // Everything downstream of painting - preview, export, the resolver's input and the
+        // groom that is saved - reads a composite, so what is shown is what is written.
+
+        MaskLayerStack ActiveStack() { return tab == Tab.Alpha ? alphaStack : lenStack; }
+        MaskLayer ActiveLayer() { return ActiveStack().Active; }
+        float[] CompositeLen() { return lenStack.Composite(); }
+        float[] CompositeAlpha() { return alphaStack.Composite(); }
+
+        // What right-drag does. On a layer with something under it, cutting a hole is almost
+        // never what is wanted: the hole shows the layer below, and if that one is painted too
+        // the erase reads as nothing at all. So above the bottom layer right-drag lays down a
+        // black mark instead - the same result as running 'Holes -> marks' on the stroke, but
+        // applied as you drag, so the canvas does not flip when the button comes up.
+        // The bottom layer has nothing underneath, where a hole and a black mark composite
+        // identically, so it keeps the true erase. Hold Shift to force a real hole anywhere.
+        bool EraseCutsHole(MaskLayerStack st) { return forceHoleErase || st.active == 0; }
+
+        // True when the tab paints into a layer stack and that layer refuses edits.
+        bool ActiveLayerLocked()
+        {
+            if (tab != Tab.Length && tab != Tab.Alpha) return false;
+            MaskLayer L = ActiveLayer();
+            return L != null && L.locked;
         }
 
         // =========================================================== GUI
@@ -213,6 +248,12 @@ namespace FurGroomingTool
                 EditorGUI.indentLevel--;
             }
 
+            if (tab == Tab.Length || tab == Tab.Alpha)
+            {
+                foldLayers = Foldout(foldLayers, "Layers  -  " + tab);
+                if (foldLayers) { EditorGUI.indentLevel++; DrawLayerPanel(ActiveStack()); EditorGUI.indentLevel--; }
+            }
+
             foldSym = Foldout(foldSym, "Symmetry / mirror");
             if (foldSym)
             {
@@ -280,10 +321,7 @@ namespace FurGroomingTool
                 if (ColorButton("Save groom", colBlue)) SaveGroom();
                 if (ColorButton("Load groom", colTeal)) LoadGroom();
             }
-            else if (ColorButton("Load mask", colTeal))
-            {
-                LoadMask(tab == Tab.Length ? lenBuf : alphaBuf);
-            }
+            else if (ColorButton("Load mask", colTeal)) LoadMask(ActiveStack());
             EditorGUILayout.EndHorizontal();
         }
 
@@ -305,12 +343,21 @@ namespace FurGroomingTool
         void DrawLengthControls()
         {
             lenMode = (LenMode)GUILayout.Toolbar((int)lenMode, new[] { "Paint", "Smudge", "Gradient" });
-            lenValue = EditorGUILayout.Slider(new GUIContent("Length value", "Left-drag paints this value. Right-drag paints black (0)."), lenValue, 0f, 1f);
+            EditorGUILayout.BeginHorizontal();
+            using (new EditorGUI.DisabledScope(ActiveLayerLocked()))
+            {
+                if (ColorButton(new GUIContent("Fill white", "Fills the selected layer with full length, edge to edge."),
+                                new Color(0.95f, 0.95f, 0.95f))) FillActiveLayer(1f);
+                if (ColorButton(new GUIContent("Fill black", "Fills the selected layer with zero length, edge to edge."),
+                                new Color(0.45f, 0.45f, 0.45f))) FillActiveLayer(0f);
+            }
+            EditorGUILayout.EndHorizontal();
+            lenValue = EditorGUILayout.Slider(new GUIContent("Length value", "Left-drag paints this value. Right-drag paints 0 as a mark, so it shows over the layers below; on the bottom layer, and with Shift held, it cuts a real hole instead."), lenValue, 0f, 1f);
             brushHardness = EditorGUILayout.Slider("Brush hardness", brushHardness, 0f, 1f);
             EditorGUILayout.BeginHorizontal();
             smoothRadius = EditorGUILayout.Slider("Smooth radius", smoothRadius, 1f, 24f);
-            if (ColorButton("Smooth all", colAmber, GUILayout.Width(90)))
-            { PushUndoActive(); SmoothBuffer(lenBuf, MN, smoothRadius); maskDirty = true; }
+            using (new EditorGUI.DisabledScope(ActiveLayerLocked()))
+                if (ColorButton("Smooth layer", colAmber, GUILayout.Width(100))) SmoothActiveLayer();
             EditorGUILayout.EndHorizontal();
             lengthProp = EditorGUILayout.TextField("Length property", lengthProp);
         }
@@ -318,13 +365,215 @@ namespace FurGroomingTool
         void DrawAlphaControls()
         {
             alphaMode = (AlphaMode)GUILayout.Toolbar((int)alphaMode, new[] { "Paint white (fur)", "Paint black (bald)" });
+            EditorGUILayout.LabelField("Right-drag marks bald; on the bottom layer, and with Shift, it erases.", EditorStyles.miniLabel);
             EditorGUILayout.BeginHorizontal();
-            if (ColorButton("Fill white", new Color(0.95f, 0.95f, 0.95f))) { PushUndoActive(); Fill(alphaBuf, 1f); maskDirty = true; }
-            if (ColorButton("Fill black", new Color(0.45f, 0.45f, 0.45f))) { PushUndoActive(); Fill(alphaBuf, 0f); maskDirty = true; }
+            using (new EditorGUI.DisabledScope(ActiveLayerLocked()))
+            {
+                if (ColorButton("Fill white", new Color(0.95f, 0.95f, 0.95f))) FillActiveLayer(1f);
+                if (ColorButton("Fill black", new Color(0.45f, 0.45f, 0.45f))) FillActiveLayer(0f);
+            }
             EditorGUILayout.EndHorizontal();
             alphaThreshold = EditorGUILayout.Slider("Threshold", alphaThreshold, 0.05f, 0.95f);
             alphaAA = EditorGUILayout.ToggleLeft("Soft 1px edge (anti-alias)", alphaAA);
             alphaProp = EditorGUILayout.TextField("Alpha property", alphaProp);
+        }
+
+        // ---- layer panel (Length and Alpha tabs)
+        //
+        // Rows are drawn top of stack first, the way a layer palette reads. Visibility,
+        // opacity, blend and name are not pushed onto the undo stack: they are one click
+        // to put back, and snapshotting a whole stack per slider frame would be wasteful.
+        void DrawLayerPanel(MaskLayerStack st)
+        {
+            int size = MN * MN;
+
+            // The rows lay themselves out edge to edge, so the settings pane's indent has to
+            // come off first: IMGUI shifts each control by the indent without shrinking the
+            // width it reserved, which walks the leading controls on top of each other.
+            int indent = EditorGUI.indentLevel;
+            EditorGUI.indentLevel = 0;
+            float pad = indent * 15f;
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(pad);
+            if (ColorButton("Add", colGreen, GUILayout.Width(48)))
+            { PushUndoStackStructure(); st.Add("Layer " + (st.Count + 1), size); maskDirty = true; }
+            if (ColorButton("Duplicate", colTeal, GUILayout.Width(78)))
+            { PushUndoStackStructure(); st.Duplicate(st.active); maskDirty = true; }
+            using (new EditorGUI.DisabledScope(!st.CanDelete(st.active)))
+                if (ColorButton(new GUIContent("Delete",
+                    "Removes the selected layer. The bottom layer is the foundation the mask composites onto, " +
+                    "so it cannot be deleted - move another layer below it first if you really want it gone."),
+                    colRed, GUILayout.Width(60)))
+                { PushUndoStackStructure(); st.Delete(st.active); maskDirty = true; }
+            using (new EditorGUI.DisabledScope(st.active >= st.Count - 1))
+                if (ColorButton("Up", colGray, GUILayout.Width(40)))
+                { PushUndoStackStructure(); st.Move(st.active, 1); maskDirty = true; }
+            using (new EditorGUI.DisabledScope(st.active <= 0))
+                if (ColorButton("Down", colGray, GUILayout.Width(48)))
+                { PushUndoStackStructure(); st.Move(st.active, -1); maskDirty = true; }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(pad);
+            using (new EditorGUI.DisabledScope(ActiveLayerLocked() || st.active == 0))
+                if (ColorButton(new GUIContent("Holes -> marks",
+                    "Turns this layer inside out: it keeps only the parts you erased, as black marks, and goes " +
+                    "transparent everywhere else. Use it on a filled layer whose erased holes vanish as soon as " +
+                    "another filled layer is shown.\n\nNot available on the bottom layer - inverting that one " +
+                    "throws away the fill everything else sits on. Move it up first if you really mean to."),
+                    colPurple, GUILayout.Width(110)))
+                    HolesToMarks(st);
+            using (new EditorGUI.DisabledScope(VisibleCount(st) < 2))
+                if (ColorButton(new GUIContent("Merge shown",
+                    "Flattens every shown layer into one, exactly as the mask composites today. Hidden layers are kept."),
+                    colGray, GUILayout.Width(100)))
+                    MergeVisible(st);
+            EditorGUILayout.EndHorizontal();
+
+            st.Composite();   // cached; refreshes each layer's `solid` flag for the hint below
+
+            // Two per-row controls that are easy to mistake for one another, so they are
+            // spelled out: a checkbox for "is this layer shown", a radio for "is this the
+            // layer the brush paints into". Exactly one layer can be the paint target.
+            const float wShow = 24f, wPaint = 34f, wBlend = 84f, wOpacity = 110f;
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(pad);
+            GUILayout.Label(new GUIContent("Show", "Tick to include this layer in the mask."),
+                            EditorStyles.miniLabel, GUILayout.Width(wShow + 6f));
+            GUILayout.Label(new GUIContent("Paint", "The layer the brush writes into."),
+                            EditorStyles.miniLabel, GUILayout.Width(wPaint));
+            GUILayout.Label("Layer", EditorStyles.miniLabel, GUILayout.MinWidth(60));
+            GUILayout.Label("Blend", EditorStyles.miniLabel, GUILayout.Width(wBlend));
+            GUILayout.Label("Opacity", EditorStyles.miniLabel, GUILayout.MinWidth(wOpacity));
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUI.BeginChangeCheck();
+            for (int i = st.Count - 1; i >= 0; i--)
+            {
+                MaskLayer L = st.At(i);
+                bool sel = i == st.active;
+
+                Rect row = EditorGUILayout.BeginHorizontal();
+                if (sel && Event.current.type == EventType.Repaint)
+                    EditorGUI.DrawRect(row, new Color(0.35f, 0.5f, 0.8f, 0.22f));
+                GUILayout.Space(pad);
+
+                L.visible = EditorGUILayout.Toggle(L.visible, GUILayout.Width(wShow));   // no label: it would claim the prefix column
+                GUILayout.Space(6);
+                if (GUILayout.Toggle(sel, GUIContent.none, EditorStyles.radioButton, GUILayout.Width(wPaint)) && !sel)
+                { st.active = i; GUI.FocusControl(null); }
+
+                if (L.locked)
+                    EditorGUILayout.LabelField(new GUIContent(L.name, "Generated layer - regenerate it instead of painting on it."),
+                                               EditorStyles.boldLabel, GUILayout.MinWidth(60));
+                else
+                    L.name = EditorGUILayout.TextField(L.name, GUILayout.MinWidth(60));
+                L.blend = (MaskBlend)EditorGUILayout.EnumPopup(L.blend, GUILayout.Width(wBlend));
+                L.opacity = EditorGUILayout.Slider(L.opacity, 0f, 1f, GUILayout.MinWidth(wOpacity));
+                EditorGUILayout.EndHorizontal();
+            }
+            if (EditorGUI.EndChangeCheck()) { st.MarkDirty(); maskDirty = true; Repaint(); }
+
+            EditorGUI.indentLevel = indent;
+
+            if (!AnyVisible(st))
+                EditorGUILayout.HelpBox("Every layer is hidden, so this mask is empty - the canvas, the preview " +
+                    "and the exported PNG will all be black. Tick 'Show' on the layers you want.", MessageType.Warning);
+            else
+            {
+                int blocker = SolidBlocker(st);
+                if (blocker >= 0)
+                {
+                    EditorGUILayout.HelpBox("'" + st.At(blocker).name + "' is painted over the whole canvas, so no " +
+                        "layer below it can show. Erasing (right-drag) only cuts a hole in this layer - the hole shows " +
+                        "the layer underneath, which here is painted too, so the two cancel out. " +
+                        "'Holes -> marks' turns this layer into stackable marks.", MessageType.Warning);
+                    if (ColorButton(new GUIContent("Turn '" + st.At(blocker).name + "' into marks",
+                        "Keeps only what you erased out of this layer, as marks, so every layer shows at once."),
+                        colPurple))
+                    { st.active = blocker; HolesToMarks(st); }
+                }
+                else if (ActiveLayerLocked())
+                    EditorGUILayout.HelpBox("'" + st.Active.name + "' is generated by the collision resolver. " +
+                        "Select another layer to paint, or hide this one to see the groom without it.", MessageType.Info);
+            }
+        }
+
+        static bool AnyVisible(MaskLayerStack st)
+        {
+            for (int i = 0; i < st.Count; i++)
+            {
+                MaskLayer L = st.At(i);
+                if (L.visible && L.opacity > 0f) return true;
+            }
+            return false;
+        }
+
+        // An erased hole shows the layer underneath. On a layer painted edge to edge there is
+        // nothing under the hole but the next filled layer, so two such layers plug each
+        // other's holes and neither shows. This turns the layer inside out - it keeps only the
+        // erased parts, as black marks, and goes transparent everywhere else - so the marks
+        // from every layer stack up instead of cancelling.
+        void HolesToMarks(MaskLayerStack st)
+        {
+            MaskLayer L = st.Active;
+            if (L == null || L.locked) return;
+            if (st.active == 0) return;   // the bottom layer is the fill everything sits on
+            PushUndoActive();
+            for (int i = 0; i < L.value.Length; i++)
+            {
+                L.cover[i] = (byte)(255 - L.cover[i]);
+                L.value[i] = 0f;
+            }
+            L.blend = MaskBlend.Normal;
+            L.opacity = Mathf.Max(L.opacity, 0.0001f);
+            st.MarkDirty(); maskDirty = true; Repaint();
+        }
+
+        // Flatten the shown layers into one, exactly as the mask composites today. Hidden
+        // layers are left where they are.
+        void MergeVisible(MaskLayerStack st)
+        {
+            int lowest = -1;
+            for (int i = 0; i < st.Count; i++)
+                if (st.At(i).visible && st.At(i).opacity > 0f) { lowest = i; break; }
+            if (lowest < 0 || VisibleCount(st) < 2) return;
+
+            PushUndoStackStructure();
+            st.MarkDirty();                 // never flatten a stale cache
+            float[] flat = st.Composite();
+            var merged = new MaskLayer("Merged", flat.Length);
+            System.Array.Copy(flat, merged.value, flat.Length);
+            for (int i = 0; i < merged.cover.Length; i++) merged.cover[i] = 255;
+
+            for (int i = st.Count - 1; i >= 0; i--)
+                if (st.At(i).visible && st.At(i).opacity > 0f) st.layers.RemoveAt(i);
+            st.layers.Insert(Mathf.Clamp(lowest, 0, st.Count), merged);
+            st.active = st.layers.IndexOf(merged);
+            st.MarkDirty(); maskDirty = true; Repaint();
+        }
+
+        static int VisibleCount(MaskLayerStack st)
+        {
+            int n = 0;
+            for (int i = 0; i < st.Count; i++) if (st.At(i).visible && st.At(i).opacity > 0f) n++;
+            return n;
+        }
+
+        // The lowest solid layer that has a visible layer underneath it doing nothing.
+        static int SolidBlocker(MaskLayerStack st)
+        {
+            for (int i = 1; i < st.Count; i++)
+            {
+                if (!st.At(i).solid) continue;
+                for (int j = i - 1; j >= 0; j--)
+                {
+                    MaskLayer below = st.At(j);
+                    if (below.visible && below.opacity > 0f) return i;
+                }
+            }
+            return -1;
         }
 
         // =========================================================== collision tab
@@ -344,6 +593,8 @@ namespace FurGroomingTool
             using (new EditorGUI.DisabledScope(!hasPreResolve))
                 if (ColorButton("Revert", colRed, GUILayout.Width(80))) RevertResolve();
             EditorGUILayout.EndHorizontal();
+
+            DrawResolverLayerControls();
 
             EditorGUILayout.BeginHorizontal();
             if (ColorButton("Save normal map", colBlue)) SaveMap(Tab.Direction);
@@ -468,22 +719,42 @@ namespace FurGroomingTool
             { EditorUtility.DisplayDialog("Fur Grooming Tool", "Add at least one clothing renderer.", "OK"); return; }
 
             preDir = (Vector2[])dir.Clone(); preDirStr = (float[])dirStr.Clone();
-            preLen = (float[])lenBuf.Clone(); preAlpha = (float[])alphaBuf.Clone();
+            preLenStack = lenStack.CloneDeep(); preAlphaStack = alphaStack.CloneDeep();
             hasPreResolve = true;
             PushUndoAll();
 
+            // The resolver only ever caps length down and punches alpha to black - that is a
+            // Min blend. So it keeps working on flat buffers: hand it the composite of the
+            // layers below its own, and record the difference as that layer's coverage.
+            MaskLayer lenLayer = lenStack.EnsureResolver(MN * MN, "Occlusion");
+            float[] beforeLen = lenStack.CompositeBelow(lenStack.ResolverIndex());
+            float[] workLen = (float[])beforeLen.Clone();
+
+            MaskLayer alphaLayer = null; float[] beforeAlpha = null, workAlpha = null;
+            if (occl.writeAlpha)
+            {
+                alphaLayer = alphaStack.EnsureResolver(MN * MN, "Occlusion");
+                beforeAlpha = alphaStack.CompositeBelow(alphaStack.ResolverIndex());
+                workAlpha = (float[])beforeAlpha.Clone();
+            }
+
             coverage = new FurCoverage();
             FurOcclusionReport rep = FurOcclusionResolver.Resolve(
-                targetRenderer, cloth, dir, dirStr, FN, lenBuf, occl.writeAlpha ? alphaBuf : null, MN,
+                targetRenderer, cloth, dir, dirStr, FN, workLen, workAlpha, MN,
                 maxAngle, flipG, occl, coverage, resolveDebug);
 
             resolveMsg = rep.Summary();
             if (rep.error != null)
             {
-                hasPreResolve = false;
+                RevertResolve();
+                resolveMsg = rep.error;
                 EditorUtility.DisplayDialog("Fur Grooming Tool", rep.error, "OK");
                 return;
             }
+
+            StampResolverLayer(lenLayer, beforeLen, workLen);
+            if (alphaLayer != null) StampResolverLayer(alphaLayer, beforeAlpha, workAlpha);
+            lenStack.MarkDirty(); alphaStack.MarkDirty();
             Debug.Log("[Fur] " + resolveMsg);
             if (coverageTex != null) DestroyImmediate(coverageTex);
             coverageTex = FurOcclusionResolver.CoverageTexture(coverage);
@@ -492,17 +763,70 @@ namespace FurGroomingTool
 
         void RevertResolve()
         {
-            if (!hasPreResolve) return;
+            if (!hasPreResolve || preDir == null || preLenStack == null || preAlphaStack == null)
+            { hasPreResolve = false; return; }   // an assembly reload can drop the pre-resolve copy
             System.Array.Copy(preDir, dir, dir.Length);
             System.Array.Copy(preDirStr, dirStr, dirStr.Length);
-            System.Array.Copy(preLen, lenBuf, lenBuf.Length);
-            System.Array.Copy(preAlpha, alphaBuf, alphaBuf.Length);
+            lenStack.CopyFrom(preLenStack);
+            alphaStack.CopyFrom(preAlphaStack);
             hasPreResolve = false;
             resolveDebug.Clear();
             if (coverageTex != null) { DestroyImmediate(coverageTex); coverageTex = null; }
             coverage = null;
             resolveMsg = "Reverted to the groom from before the last resolve.";
             RefreshResolverMaps();
+        }
+
+        // The resolve result becomes one Min layer whose coverage is exactly the texels it
+        // touched, so hiding it restores the pre-resolve composite bit for bit.
+        static void StampResolverLayer(MaskLayer L, float[] before, float[] after)
+        {
+            L.blend = MaskBlend.Min;
+            L.locked = true; L.isResolver = true;
+            L.visible = true; L.opacity = 1f;
+            for (int i = 0; i < after.Length; i++)
+            {
+                L.value[i] = after[i];
+                L.cover[i] = after[i] < before[i] - 1e-6f ? (byte)255 : (byte)0;
+            }
+        }
+
+        // Show/hide/drop the layer the last resolve wrote, without touching the groom under it.
+        void DrawResolverLayerControls()
+        {
+            int li = lenStack.ResolverIndex(), ai = alphaStack.ResolverIndex();
+            if (li < 0 && ai < 0) return;
+
+            MaskLayer probe = li >= 0 ? lenStack.At(li) : alphaStack.At(ai);
+            EditorGUILayout.BeginHorizontal();
+            bool vis = EditorGUILayout.ToggleLeft(new GUIContent("Show resolve layer",
+                "The resolve lives on its own layer. Untick to see the groom exactly as it was before."),
+                probe.visible, GUILayout.Width(150));
+            if (vis != probe.visible)
+            {
+                if (li >= 0) lenStack.At(li).visible = vis;
+                if (ai >= 0) alphaStack.At(ai).visible = vis;
+                lenStack.MarkDirty(); alphaStack.MarkDirty();
+                RefreshResolverMaps();
+            }
+            float op = EditorGUILayout.Slider(probe.opacity, 0f, 1f);
+            if (!Mathf.Approximately(op, probe.opacity))
+            {
+                if (li >= 0) lenStack.At(li).opacity = op;
+                if (ai >= 0) alphaStack.At(ai).opacity = op;
+                lenStack.MarkDirty(); alphaStack.MarkDirty();
+                RefreshResolverMaps();
+            }
+            if (ColorButton("Drop layer", colRed, GUILayout.Width(90)))
+            {
+                PushUndoStackStructure();
+                if (li >= 0) lenStack.Delete(li);
+                if (ai >= 0) alphaStack.Delete(ai);
+                resolveDebug.Clear();
+                resolveMsg = "Dropped the resolve layer.";
+                RefreshResolverMaps();
+            }
+            EditorGUILayout.EndHorizontal();
         }
 
         void RefreshResolverMaps()
@@ -655,7 +979,9 @@ namespace FurGroomingTool
 
             if (e.type == EventType.MouseDown && (e.button == 0 || e.button == 1) && inside)
             {
+                if (ActiveLayerLocked()) { e.Use(); return; }
                 paintErase = e.button == 1;
+                forceHoleErase = e.shift;
                 PushUndoActive();
                 if (tab == Tab.Length && lenMode == LenMode.Gradient && !paintErase)
                 { gradActive = true; gradStart = gradEnd = uv; }
@@ -691,16 +1017,32 @@ namespace FurGroomingTool
             }
             else if (tab == Tab.Length)
             {
-                if (paintErase) WalkField(a, b, MN, fc => DabPaint(lenBuf, MN, fc, 0f, brushHardness));
-                else if (lenMode == LenMode.Smudge) WalkField(a, b, MN, fc => DabSmudge(lenBuf, MN, fc));
-                else WalkField(a, b, MN, fc => DabPaint(lenBuf, MN, fc, lenValue, brushHardness));
-                maskDirty = true;
+                MaskLayer L = lenStack.Active;
+                if (L == null || L.locked) return;
+                if (paintErase)
+                {
+                    if (EraseCutsHole(lenStack)) WalkField(a, b, MN, fc => DabErase(L.cover, MN, fc, brushHardness));
+                    else WalkField(a, b, MN, fc => DabPaint(L.value, MN, fc, 0f, brushHardness, false, L.cover));
+                }
+                else if (lenMode == LenMode.Smudge) WalkField(a, b, MN, fc => DabSmudge(L.value, L.cover, MN, fc));
+                else WalkField(a, b, MN, fc => DabPaint(L.value, MN, fc, lenValue, brushHardness, false, L.cover));
+                lenStack.MarkDirty(); maskDirty = true;
             }
             else
             {
-                float target = paintErase ? 0f : (alphaMode == AlphaMode.White ? 1f : 0f);
-                WalkField(a, b, MN, fc => DabPaint(alphaBuf, MN, fc, target, 1f, true));
-                maskDirty = true;
+                MaskLayer L = alphaStack.Active;
+                if (L == null || L.locked) return;
+                if (paintErase)
+                {
+                    if (EraseCutsHole(alphaStack)) WalkField(a, b, MN, fc => DabErase(L.cover, MN, fc, 1f));
+                    else WalkField(a, b, MN, fc => DabPaint(L.value, MN, fc, 0f, 1f, true, L.cover));
+                }
+                else
+                {
+                    float target = alphaMode == AlphaMode.White ? 1f : 0f;
+                    WalkField(a, b, MN, fc => DabPaint(L.value, MN, fc, target, 1f, true, L.cover));
+                }
+                alphaStack.MarkDirty(); maskDirty = true;
             }
         }
 
@@ -755,7 +1097,9 @@ namespace FurGroomingTool
                 }
         }
 
-        void DabPaint(float[] buf, int res, Vector2 fc, float target, float hardness, bool full = false)
+        // `cover` is optional: the Direction field has none, mask layers pass theirs so the
+        // painted value and the coverage that reveals it rise by the same weight.
+        void DabPaint(float[] buf, int res, Vector2 fc, float target, float hardness, bool full = false, byte[] cover = null)
         {
             float r = BrushCells(res);
             int i0 = Mathf.Max(0, Mathf.FloorToInt(fc.x - r)), i1 = Mathf.Min(res - 1, Mathf.CeilToInt(fc.x + r));
@@ -769,10 +1113,29 @@ namespace FurGroomingTool
                     float w = Mathf.Clamp01(Falloff(dist, r, hardness) * flow);
                     int idx = j * res + i;
                     buf[idx] = Mathf.Lerp(buf[idx], target, w);
+                    if (cover != null) cover[idx] = MaskLayer.Raise(cover[idx], w);
                 }
         }
 
-        void DabSmudge(float[] buf, int res, Vector2 fc)
+        // Right-drag on a mask tab: lower this layer's coverage, leaving its value alone,
+        // so the layers below show through where the brush passed.
+        void DabErase(byte[] cover, int res, Vector2 fc, float hardness)
+        {
+            float r = BrushCells(res);
+            int i0 = Mathf.Max(0, Mathf.FloorToInt(fc.x - r)), i1 = Mathf.Min(res - 1, Mathf.CeilToInt(fc.x + r));
+            int j0 = Mathf.Max(0, Mathf.FloorToInt(fc.y - r)), j1 = Mathf.Min(res - 1, Mathf.CeilToInt(fc.y + r));
+            for (int j = j0; j <= j1; j++)
+                for (int i = i0; i <= i1; i++)
+                {
+                    float dist = Vector2.Distance(new Vector2(i + 0.5f, j + 0.5f), fc);
+                    if (dist > r) continue;
+                    float w = Mathf.Clamp01(Falloff(dist, r, hardness) * brushFlow);
+                    int idx = j * res + i;
+                    cover[idx] = MaskLayer.Lower(cover[idx], w);
+                }
+        }
+
+        void DabSmudge(float[] buf, byte[] cover, int res, Vector2 fc)
         {
             float r = BrushCells(res);
             int i0 = Mathf.Max(0, Mathf.FloorToInt(fc.x - r)), i1 = Mathf.Min(res - 1, Mathf.CeilToInt(fc.x + r));
@@ -784,14 +1147,20 @@ namespace FurGroomingTool
                     if (dist > r) continue;
                     float w = Mathf.Clamp01(Falloff(dist, r, 0f) * brushFlow * 0.8f);
                     int idx = j * res + i;
-                    float s = 0f; int cnt = 0;
+                    float s = 0f, sc = 0f; int cnt = 0;
                     for (int dy = -1; dy <= 1; dy++)
                         for (int dx = -1; dx <= 1; dx++)
                         {
                             int x = Mathf.Clamp(i + dx, 0, res - 1), y = Mathf.Clamp(j + dy, 0, res - 1);
-                            s += buf[y * res + x]; cnt++;
+                            s += buf[y * res + x];
+                            if (cover != null) sc += cover[y * res + x];
+                            cnt++;
                         }
                     buf[idx] = Mathf.Lerp(buf[idx], s / cnt, w);
+                    // Smear coverage with the value, so a smudge drags the painted region's
+                    // edge instead of only shuffling values inside it.
+                    if (cover != null)
+                        cover[idx] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(cover[idx], sc / cnt, w)), 0, 255);
                 }
         }
 
@@ -800,32 +1169,55 @@ namespace FurGroomingTool
             GradientInto(uvA, uvB, true);
         }
 
+        // Whole-canvas ops write the active layer and take it solid: they set a value
+        // everywhere, so coverage everywhere is what makes that value visible.
         void GradientInto(Vector2 uvA, Vector2 uvB, bool reset)
         {
             Vector2 d = uvB - uvA; float len2 = d.sqrMagnitude;
             if (len2 < 1e-6f) return;
+            MaskLayer L = lenStack.Active;
+            if (L == null || L.locked) return;
             for (int r = 0; r < MN; r++)
                 for (int c = 0; c < MN; c++)
                 {
                     Vector2 uv = new Vector2((c + 0.5f) / MN, (r + 0.5f) / MN);
                     float t = Mathf.Clamp01(Vector2.Dot(uv - uvA, d) / len2);
                     int idx = r * MN + c;
-                    lenBuf[idx] = reset ? t : Mathf.Max(lenBuf[idx], t);
+                    L.value[idx] = reset ? t : Mathf.Max(L.value[idx], t);
+                    L.cover[idx] = 255;
                 }
+            lenStack.MarkDirty();
         }
 
         // =========================================================== buffers / fx
 
         void ClearLayer()
         {
+            if (ActiveLayerLocked()) return;
             PushUndoActive();
             if (tab == Tab.Direction) { System.Array.Clear(dir, 0, dir.Length); System.Array.Clear(dirStr, 0, dirStr.Length); }
-            else if (tab == Tab.Length) System.Array.Clear(lenBuf, 0, lenBuf.Length);
-            else System.Array.Clear(alphaBuf, 0, alphaBuf.Length);
+            else { ActiveLayer().Clear(); ActiveStack().MarkDirty(); }
             maskDirty = true; Repaint();
         }
 
-        void Fill(float[] buf, float v) { for (int i = 0; i < buf.Length; i++) buf[i] = v; }
+        void FillActiveLayer(float v)
+        {
+            MaskLayer L = ActiveLayer();
+            if (L == null || L.locked) return;
+            PushUndoActive();
+            for (int i = 0; i < L.value.Length; i++) { L.value[i] = v; L.cover[i] = 255; }
+            ActiveStack().MarkDirty(); maskDirty = true;
+        }
+
+        void SmoothActiveLayer()
+        {
+            MaskLayer L = ActiveLayer();
+            if (L == null || L.locked) return;
+            PushUndoActive();
+            SmoothBuffer(L.value, MN, smoothRadius);
+            SmoothCover(L.cover, MN, smoothRadius);
+            ActiveStack().MarkDirty(); maskDirty = true;
+        }
 
         void DrawUndoButtons()
         {
@@ -844,43 +1236,88 @@ namespace FurGroomingTool
             else if (e.keyCode == KeyCode.Y) { DoRedo(); e.Use(); }
         }
 
-        Snapshot Capture(bool d, bool l, bool a)
+        StackSnap CaptureStack(MaskLayerStack st, Cap c, int index)
+        {
+            if (c == Cap.None) return null;
+            if (c == Cap.Whole) return new StackSnap { whole = st.CloneDeep() };
+            MaskLayer L = st.At(index < 0 ? st.active : index);
+            if (L == null) return new StackSnap { whole = st.CloneDeep() };
+            return new StackSnap
+            {
+                index = index < 0 ? st.active : index,
+                value = (float[])L.value.Clone(),
+                cover = (byte[])L.cover.Clone()
+            };
+        }
+
+        void ApplyStack(MaskLayerStack st, StackSnap s)
+        {
+            if (s == null) return;
+            if (s.whole != null) { st.CopyFrom(s.whole); return; }
+            MaskLayer L = st.At(s.index);
+            if (L != null)   // the layer may have been deleted since; then there is nothing to restore
+            {
+                System.Array.Copy(s.value, L.value, L.value.Length);
+                System.Array.Copy(s.cover, L.cover, L.cover.Length);
+            }
+            st.MarkDirty();
+        }
+
+        // Re-capture the same shape a snapshot has, so undo and redo stay symmetric.
+        static Cap ShapeOf(StackSnap s) { return s == null ? Cap.None : (s.whole != null ? Cap.Whole : Cap.Layer); }
+
+        Snapshot Capture(bool d, Cap l, Cap a, int lIdx = -1, int aIdx = -1)
         {
             var s = new Snapshot();
             if (d) { s.dir = (Vector2[])dir.Clone(); s.dirStr = (float[])dirStr.Clone(); }
-            if (l) s.len = (float[])lenBuf.Clone();
-            if (a) s.alpha = (float[])alphaBuf.Clone();
+            s.len = CaptureStack(lenStack, l, lIdx);
+            s.alpha = CaptureStack(alphaStack, a, aIdx);
             return s;
         }
 
         void ApplySnapshot(Snapshot s)
         {
             if (s.dir != null) { System.Array.Copy(s.dir, dir, dir.Length); System.Array.Copy(s.dirStr, dirStr, dirStr.Length); }
-            if (s.len != null) System.Array.Copy(s.len, lenBuf, lenBuf.Length);
-            if (s.alpha != null) System.Array.Copy(s.alpha, alphaBuf, alphaBuf.Length);
+            ApplyStack(lenStack, s.len);
+            ApplyStack(alphaStack, s.alpha);
             if (s.dir != null && normalPreview != null) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
             maskDirty = true; Repaint();
         }
 
-        void PushUndo(bool d, bool l, bool a)
+        void PushUndo(bool d, Cap l, Cap a)
         {
             undoStack.Add(Capture(d, l, a));
             while (undoStack.Count > MaxUndo) undoStack.RemoveAt(0);
             redoStack.Clear();
         }
 
+        // A stroke or a whole-canvas op: only the layer being edited.
         void PushUndoActive()
         {
-            if (tab == Tab.Collision) PushUndoAll();
-            else PushUndo(tab == Tab.Direction, tab == Tab.Length, tab == Tab.Alpha);
+            if (tab == Tab.Collision) { PushUndoAll(); return; }
+            PushUndo(tab == Tab.Direction,
+                     tab == Tab.Length ? Cap.Layer : Cap.None,
+                     tab == Tab.Alpha ? Cap.Layer : Cap.None);
         }
-        void PushUndoAll() => PushUndo(true, true, true);
+
+        // Add / delete / duplicate / reorder change the stack itself. The Collision tab's
+        // layer controls drive both masks at once, so there both are kept.
+        void PushUndoStackStructure()
+        {
+            if (tab == Tab.Collision) { PushUndo(false, Cap.Whole, Cap.Whole); return; }
+            PushUndo(false,
+                     tab == Tab.Alpha ? Cap.None : Cap.Whole,
+                     tab == Tab.Alpha ? Cap.Whole : Cap.None);
+        }
+
+        void PushUndoAll() => PushUndo(true, Cap.Whole, Cap.Whole);
 
         void DoUndo()
         {
             if (undoStack.Count == 0) return;
             Snapshot s = undoStack[undoStack.Count - 1]; undoStack.RemoveAt(undoStack.Count - 1);
-            redoStack.Add(Capture(s.dir != null, s.len != null, s.alpha != null));
+            redoStack.Add(Capture(s.dir != null, ShapeOf(s.len), ShapeOf(s.alpha),
+                                  s.len != null ? s.len.index : -1, s.alpha != null ? s.alpha.index : -1));
             ApplySnapshot(s);
         }
 
@@ -888,7 +1325,8 @@ namespace FurGroomingTool
         {
             if (redoStack.Count == 0) return;
             Snapshot s = redoStack[redoStack.Count - 1]; redoStack.RemoveAt(redoStack.Count - 1);
-            undoStack.Add(Capture(s.dir != null, s.len != null, s.alpha != null));
+            undoStack.Add(Capture(s.dir != null, ShapeOf(s.len), ShapeOf(s.alpha),
+                                  s.len != null ? s.len.index : -1, s.alpha != null ? s.alpha.index : -1));
             ApplySnapshot(s);
         }
 
@@ -912,6 +1350,28 @@ namespace FurGroomingTool
                 }
         }
 
+        // Blurred alongside the value, so smoothing softens the painted region's edge
+        // instead of leaving a hard coverage cut across a now-soft value.
+        static void SmoothCover(byte[] buf, int res, float radius)
+        {
+            int rad = Mathf.Max(1, Mathf.RoundToInt(radius));
+            var tmp = new float[buf.Length];
+            for (int y = 0; y < res; y++)
+                for (int x = 0; x < res; x++)
+                {
+                    float s = 0; int n = 0;
+                    for (int k = -rad; k <= rad; k++) { int xx = Mathf.Clamp(x + k, 0, res - 1); s += buf[y * res + xx]; n++; }
+                    tmp[y * res + x] = s / n;
+                }
+            for (int y = 0; y < res; y++)
+                for (int x = 0; x < res; x++)
+                {
+                    float s = 0; int n = 0;
+                    for (int k = -rad; k <= rad; k++) { int yy = Mathf.Clamp(y + k, 0, res - 1); s += tmp[yy * res + x]; n++; }
+                    buf[y * res + x] = (byte)Mathf.Clamp(Mathf.RoundToInt(s / n), 0, 255);
+                }
+        }
+
         float AlphaResolve(float v)
         {
             if (!alphaAA) return v >= alphaThreshold ? 1f : 0f;
@@ -920,11 +1380,18 @@ namespace FurGroomingTool
 
         // =========================================================== textures
 
+        // Both masks are rebuilt from their composites: the Collision tab shows the two side
+        // by side, so refreshing only the active tab's texture would leave one of them stale.
         void RebuildMaskTex()
         {
             Ensure(ref lenTex, MN); Ensure(ref alphaTex, MN);
-            float[] src = tab == Tab.Alpha ? alphaBuf : lenBuf;
-            Texture2D dst = tab == Tab.Alpha ? alphaTex : lenTex;
+            BlitMask(lenTex, CompositeLen(), false);
+            BlitMask(alphaTex, CompositeAlpha(), true);
+            maskDirty = false;
+        }
+
+        void BlitMask(Texture2D dst, float[] src, bool alpha)
+        {
             var px = new Color32[MN * MN];
             for (int r = 0; r < MN; r++)
             {
@@ -932,13 +1399,12 @@ namespace FurGroomingTool
                 for (int c = 0; c < MN; c++)
                 {
                     float v = src[r * MN + c];
-                    if (tab == Tab.Alpha) v = AlphaResolve(v);
+                    if (alpha) v = AlphaResolve(v);
                     byte b = Enc(v);
                     px[outRow * MN + c] = new Color32(b, b, b, 255);
                 }
             }
             dst.SetPixels32(px); dst.Apply();
-            maskDirty = false;
         }
 
         Texture2D BuildNormalTex(int res)
@@ -1011,8 +1477,8 @@ namespace FurGroomingTool
         {
             string b = string.IsNullOrEmpty(baseName) ? "Fur" : baseName;
             if (which == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), b + "_Normal", true, normalProp);
-            else if (which == Tab.Length) SaveTexture(BuildMaskTex(exportRes, lenBuf, false), b + "_Length", false, lengthProp);
-            else if (which == Tab.Alpha) SaveTexture(BuildMaskTex(exportRes, alphaBuf, true), b + "_Alpha", false, alphaProp);
+            else if (which == Tab.Length) SaveTexture(BuildMaskTex(exportRes, CompositeLen(), false), b + "_Length", false, lengthProp);
+            else if (which == Tab.Alpha) SaveTexture(BuildMaskTex(exportRes, CompositeAlpha(), true), b + "_Alpha", false, alphaProp);
         }
 
         void SaveTexture(Texture2D tex, string name, bool normal, string prop)
@@ -1054,18 +1520,25 @@ namespace FurGroomingTool
             Debug.Log("[Fur] Saved " + name + " -> " + path);
         }
 
+        // Groom file v2 keeps the whole layer stack. A v1 file opens with FN (256), so the
+        // negative magic tells the two apart and v1 grooms keep loading, into one base layer.
+        const int GroomV2Magic = -2;
+
         void SaveGroom()
         {
             string p = EditorUtility.SaveFilePanel("Save groom data", "", "groom", "bytes");
             if (string.IsNullOrEmpty(p)) return;
-            using (var w = new BinaryWriter(File.Open(p, FileMode.Create)))
-            {
-                w.Write(FN); w.Write(MN);
-                for (int i = 0; i < FN * FN; i++) { w.Write(dir[i].x); w.Write(dir[i].y); w.Write(dirStr[i]); }
-                for (int i = 0; i < MN * MN; i++) w.Write(lenBuf[i]);
-                for (int i = 0; i < MN * MN; i++) w.Write(alphaBuf[i]);
-            }
+            using (var w = new BinaryWriter(File.Open(p, FileMode.Create))) WriteGroom(w);
             Debug.Log("[Fur] Groom saved -> " + p);
+        }
+
+        void WriteGroom(BinaryWriter w)
+        {
+            w.Write(GroomV2Magic);
+            w.Write(FN); w.Write(MN);
+            for (int i = 0; i < FN * FN; i++) { w.Write(dir[i].x); w.Write(dir[i].y); w.Write(dirStr[i]); }
+            lenStack.Write(w);
+            alphaStack.Write(w);
         }
 
         void LoadGroom()
@@ -1073,20 +1546,41 @@ namespace FurGroomingTool
             string p = EditorUtility.OpenFilePanel("Load groom data", "", "bytes");
             if (string.IsNullOrEmpty(p)) return;
             PushUndoAll();
-            using (var r = new BinaryReader(File.Open(p, FileMode.Open)))
-            {
-                if (r.ReadInt32() != FN || r.ReadInt32() != MN) { Debug.LogError("[Fur] Groom resolution mismatch."); return; }
-                for (int i = 0; i < FN * FN; i++) { dir[i] = new Vector2(r.ReadSingle(), r.ReadSingle()); dirStr[i] = r.ReadSingle(); }
-                for (int i = 0; i < MN * MN; i++) lenBuf[i] = r.ReadSingle();
-                for (int i = 0; i < MN * MN; i++) alphaBuf[i] = r.ReadSingle();
-            }
+            using (var r = new BinaryReader(File.Open(p, FileMode.Open))) ReadGroom(r);
             maskDirty = true; Repaint();
         }
 
-        // Import a grayscale image into a mask buffer (reads the red channel).
-        // Oriented to round-trip with the exported PNG (buffer row 0 = top = V=1).
-        void LoadMask(float[] buf)
+        bool ReadGroom(BinaryReader r)
         {
+            int first = r.ReadInt32();
+            bool v2 = first == GroomV2Magic;
+            int fn = v2 ? r.ReadInt32() : first;
+            int mn = r.ReadInt32();
+            if (fn != FN || mn != MN) { Debug.LogError("[Fur] Groom resolution mismatch."); return false; }
+            for (int i = 0; i < FN * FN; i++) { dir[i] = new Vector2(r.ReadSingle(), r.ReadSingle()); dirStr[i] = r.ReadSingle(); }
+            if (v2)
+            {
+                lenStack.Read(r, MN * MN);
+                alphaStack.Read(r, MN * MN);
+            }
+            else
+            {
+                var flat = new float[MN * MN];
+                for (int i = 0; i < MN * MN; i++) flat[i] = r.ReadSingle();
+                lenStack.SetSingle("Base", flat);
+                for (int i = 0; i < MN * MN; i++) flat[i] = r.ReadSingle();
+                alphaStack.SetSingle("Base", flat);
+            }
+            lenStack.Ensure(MN * MN, "Base"); alphaStack.Ensure(MN * MN, "Base");
+            return true;
+        }
+
+        // Import a grayscale image into the active layer (reads the red channel), taking the
+        // layer solid. Oriented to round-trip with the exported PNG (row 0 = top = V=1).
+        void LoadMask(MaskLayerStack st)
+        {
+            MaskLayer L = st.Active;
+            if (L == null || L.locked) return;
             string p = EditorUtility.OpenFilePanelWithFilters("Load mask image", Application.dataPath,
                 new[] { "Image", "png,jpg,jpeg,tga,bmp", "All files", "*" });
             if (string.IsNullOrEmpty(p)) return;
@@ -1097,9 +1591,14 @@ namespace FurGroomingTool
             {
                 float v = 1f - y / (float)(MN - 1);
                 for (int x = 0; x < MN; x++)
-                    buf[y * MN + x] = tex.GetPixelBilinear(x / (float)(MN - 1), v).r;
+                {
+                    int idx = y * MN + x;
+                    L.value[idx] = tex.GetPixelBilinear(x / (float)(MN - 1), v).r;
+                    L.cover[idx] = 255;
+                }
             }
             Object.DestroyImmediate(tex);
+            st.MarkDirty();
             maskDirty = true; Repaint();
             Debug.Log("[Fur] Loaded mask <- " + p);
         }
@@ -1119,6 +1618,11 @@ namespace FurGroomingTool
         static readonly Color colGray = new Color(0.82f, 0.82f, 0.82f);
 
         static bool ColorButton(string label, Color col, params GUILayoutOption[] opts)
+        {
+            return ColorButton(new GUIContent(label), col, opts);
+        }
+
+        static bool ColorButton(GUIContent label, Color col, params GUILayoutOption[] opts)
         {
             Color prev = GUI.backgroundColor;
             GUI.backgroundColor = col;
@@ -1189,13 +1693,42 @@ namespace FurGroomingTool
             bool isX = mirrorDir == MirrorDir.LeftToRight || mirrorDir == MirrorDir.RightToLeft;
             bool sourceLow = mirrorDir == MirrorDir.LeftToRight || mirrorDir == MirrorDir.TopToBottom;
             MirrorBakeDir(isX, sourceLow);
-            MirrorBakeBuffer(lenBuf, MN, isX, sourceLow);
-            MirrorBakeBuffer(alphaBuf, MN, isX, sourceLow);
+            MirrorStack(lenStack, isX, sourceLow);
+            MirrorStack(alphaStack, isX, sourceLow);
             if (normalPreview != null) normalPreview = BuildNormalTex(Mathf.Min(exportRes, 1024));
             maskDirty = true; Repaint();
         }
 
+        // Mirror is a groom-wide op, so every layer gets it. Coverage is mirrored with the
+        // value rather than filled in - the mirrored half must be as painted as its source.
+        void MirrorStack(MaskLayerStack st, bool isX, bool sourceLow)
+        {
+            for (int i = 0; i < st.Count; i++)
+            {
+                MaskLayer L = st.At(i);
+                MirrorBakeBuffer(L.value, MN, isX, sourceLow);
+                MirrorBakeCover(L.cover, MN, isX, sourceLow);
+            }
+            st.MarkDirty();
+        }
+
         void MirrorBakeBuffer(float[] buf, int res, bool isX, bool sourceLow)
+        {
+            float ax = symAxis;
+            for (int y = 0; y < res; y++)
+                for (int x = 0; x < res; x++)
+                {
+                    float u = ((isX ? x : y) + 0.5f) / res;
+                    bool inDest = sourceLow ? u > ax : u < ax;
+                    if (!inDest) continue;
+                    int sx = x, sy = y;
+                    if (isX) sx = Mathf.Clamp(Mathf.RoundToInt(2f * ax * res - x - 1f), 0, res - 1);
+                    else sy = Mathf.Clamp(Mathf.RoundToInt(2f * ax * res - y - 1f), 0, res - 1);
+                    buf[y * res + x] = buf[sy * res + sx];
+                }
+        }
+
+        void MirrorBakeCover(byte[] buf, int res, bool isX, bool sourceLow)
         {
             float ax = symAxis;
             for (int y = 0; y < res; y++)
