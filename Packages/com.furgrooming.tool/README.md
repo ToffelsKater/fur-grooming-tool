@@ -27,7 +27,7 @@ Open the tool from the menu: **Tools ▸ Fur Grooming Tool**.
 
 ## Workflow
 
-1. Drag your UV-layout snapshot into **Background**.
+1. Assign **Mesh (renderer)** to generate a UV layout, or drag a UV-layout snapshot into **Background**. **UV map** defaults to **UV0** for each newly assigned mesh; choose another available channel (UV1 through UV7) to display that channel alone. The Scene view marker follows the selected channel too. **Refresh UV** reloads the layout from the mesh. This selects the painting guide, not the material's texture UV settings; the Collision resolver still uses UV0.
 2. (Optional) drag the avatar's liltoon **material** into **Target material** to auto-assign maps on save.
 3. Pick a tab and paint:
    - **Left-drag** paints. **Right-drag** marks black (or erases, on the bottom layer / with Shift). **Scroll** to zoom (cursor-anchored). **Middle-drag** to pan.

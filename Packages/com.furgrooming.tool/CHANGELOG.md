@@ -2,8 +2,9 @@
 
 All notable changes to this package are documented here.
 
-## [Unreleased]
+## [1.1.0] - 2026-09-15
 ### Added
+- **UV map** dropdown in the paint window. New mesh selections default to UV0; available UV1–UV7 channels can be displayed individually, with the Scene view marker using the same channel.
 - **Paint layers on the Length and Alpha tabs.** A small Photoshop-style stack: add, duplicate, delete,
   reorder, rename, show/hide, opacity, and a blend mode per layer (Normal / Min / Max). Painting goes to the
   selected layer, so work can be tried, kept or dropped without disturbing what is underneath. Direction stays
@@ -29,6 +30,20 @@ All notable changes to this package are documented here.
   groom below - and re-running rewrites nothing else. Show/hide/opacity/drop controls sit on the Collision tab.
 - Groom files gained a v2 format that stores the whole stack. Files written by 1.0.x still load, into a single
   base layer per mask.
+- **Fur occlusion resolver**, on its own **Collision** tab: keeps groomed fur out of clothing by measuring the
+  outfit's shadow on the body. A fan of rays over the hemisphere at each texel gives how shadowed the spot is,
+  how much clear headroom it has, and which way there is still room; the fur is then leaned over just far enough
+  for its tip to fit under the headroom, its bearing nudged towards the open side, and its length capped by the
+  room left along the direction it ends up in.
+- The clothing is rasterized into a voxel volume once, so a ray is a plain 3D-DDA walk over a bitset rather than
+  a triangle-list test. A 20k-triangle garment against a full 256x256 direction field resolves in about 0.15s at
+  medium quality, 0.20s at fine. The texel pass is threaded, and a coarse copy of the volume rejects the parts of
+  the body nowhere near the outfit.
+- The coverage field is shown as a map on the tab, beside previews of the three masks the resolver writes, so
+  what the tool makes of your avatar can be looked at rather than guessed at.
+- Scene-view debug hairs for the last run: surface normal in green, fur as groomed in blue, fur after resolving
+  in red.
+- Revert, and a resolve counts as a single undo step.
 ### Changed
 - **Right-drag on the Length and Alpha tabs now lays down a black mark** on any layer above the bottom one, so
   it stacks over the layers below instead of cutting a hole that shows a layer which is usually painted too.
@@ -44,20 +59,6 @@ All notable changes to this package are documented here.
 - Mirror applies to every layer of both masks, mirroring coverage along with the value.
 - "Smooth all" is now "Smooth layer" and blurs coverage alongside the value, so the painted region's edge
   softens with it.
-- **Fur occlusion resolver**, on its own **Collision** tab: keeps groomed fur out of clothing by measuring the
-  outfit's shadow on the body. A fan of rays over the hemisphere at each texel gives how shadowed the spot is,
-  how much clear headroom it has, and which way there is still room; the fur is then leaned over just far enough
-  for its tip to fit under the headroom, its bearing nudged towards the open side, and its length capped by the
-  room left along the direction it ends up in.
-- The clothing is rasterized into a voxel volume once, so a ray is a plain 3D-DDA walk over a bitset rather than
-  a triangle-list test. A 20k-triangle garment against a full 256x256 direction field resolves in about 0.15s at
-  medium quality, 0.20s at fine. The texel pass is threaded, and a coarse copy of the volume rejects the parts of
-  the body nowhere near the outfit.
-- The coverage field is shown as a map on the tab, beside previews of the three masks the resolver writes, so
-  what the tool makes of your avatar can be looked at rather than guessed at.
-- Scene-view debug hairs for the last run: surface normal in green, fur as groomed in blue, fur after resolving
-  in red.
-- Revert, and a resolve counts as a single undo step.
 
 ## [1.0.3] - 2026-06-22
 ### Added

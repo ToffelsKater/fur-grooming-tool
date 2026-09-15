@@ -51,6 +51,8 @@ namespace FurGroomingTool
         [SerializeField] Texture2D bg;
         [SerializeField] Material targetMat;
         [SerializeField] Renderer targetRenderer;
+        [SerializeField] int uvChannel = 0;
+        [SerializeField] Texture2D uvBackground;
         [SerializeField] bool showOnMesh = false;
         [SerializeField] MarkerShape markerShape = MarkerShape.Sphere;
         [SerializeField] Color markerColor = new Color(1f, 0.7f, 0.2f, 1f);
@@ -222,9 +224,10 @@ namespace FurGroomingTool
                 targetMat = (Material)EditorGUILayout.ObjectField("Target material", targetMat, typeof(Material), false);
                 EditorGUILayout.BeginHorizontal();
                 Renderer rendNew = (Renderer)EditorGUILayout.ObjectField(new GUIContent("Mesh (renderer)", "The exact mesh to read UVs from and to highlight in the Scene view. Drag the avatar's mesh object from the Hierarchy."), targetRenderer, typeof(Renderer), true);
-                if (rendNew != targetRenderer) { targetRenderer = rendNew; CacheMesh(); if (targetRenderer != null) GenerateUvBackground(); }
+                if (rendNew != targetRenderer) SetTargetRenderer(rendNew);
                 if (ColorButton("Refresh UV", colTeal, GUILayout.Width(90))) GenerateUvBackground();
                 EditorGUILayout.EndHorizontal();
+                DrawUvChannelSelector();
                 brushSize = EditorGUILayout.IntSlider("Brush size", brushSize, 2, 200);
                 brushFlow = EditorGUILayout.Slider("Brush flow", brushFlow, 0.02f, 1f);
                 bgOpacity = EditorGUILayout.Slider("BG opacity", bgOpacity, 0f, 1f);
@@ -619,7 +622,7 @@ namespace FurGroomingTool
             EditorGUILayout.Space(2);
             Renderer rendNew = (Renderer)EditorGUILayout.ObjectField(new GUIContent("Fur mesh",
                 "The mesh the fur grows on. Same renderer as on the paint tabs."), targetRenderer, typeof(Renderer), true);
-            if (rendNew != targetRenderer) { targetRenderer = rendNew; CacheMesh(); }
+            if (rendNew != targetRenderer) SetTargetRenderer(rendNew);
 
             EditorGUILayout.LabelField("Clothing meshes");
             EditorGUI.indentLevel++;
@@ -1771,22 +1774,87 @@ namespace FurGroomingTool
 
         // =========================================================== mesh highlight
 
+        void SetTargetRenderer(Renderer renderer)
+        {
+            targetRenderer = renderer;
+            uvChannel = 0;
+            ClearUvBackground();
+            if (FindUvMesh() != null) GenerateUvBackground();
+            else CacheMesh();
+        }
+
+        static bool HasUvChannel(Mesh mesh, int channel)
+        {
+            return mesh != null && channel >= 0 && channel < 8 &&
+                mesh.HasVertexAttribute((UnityEngine.Rendering.VertexAttribute)
+                    ((int)UnityEngine.Rendering.VertexAttribute.TexCoord0 + channel));
+        }
+
+        void DrawUvChannelSelector()
+        {
+            Mesh mesh = FindUvMesh();
+            var labels = new System.Collections.Generic.List<GUIContent>();
+            var channels = new System.Collections.Generic.List<int>();
+            // Keep UV0 as the default even when absent; never silently display another map.
+            labels.Add(new GUIContent(mesh != null && !HasUvChannel(mesh, 0) ? "UV0 (missing)" : "UV0"));
+            channels.Add(0);
+            for (int channel = 1; channel < 8; channel++)
+            {
+                if (!HasUvChannel(mesh, channel)) continue;
+                labels.Add(new GUIContent("UV" + channel));
+                channels.Add(channel);
+            }
+            using (new EditorGUI.DisabledScope(mesh == null))
+            {
+                int selected = EditorGUILayout.IntPopup(new GUIContent("UV map",
+                    "Display one UV channel in the paint window and use it for the Scene view marker. Defaults to UV0. This does not change the material's UV settings."),
+                    uvChannel, labels.ToArray(), channels.ToArray());
+                if (selected != uvChannel)
+                {
+                    uvChannel = selected;
+                    GenerateUvBackground();
+                }
+            }
+            if (mesh != null && !HasUvChannel(mesh, uvChannel))
+                EditorGUILayout.HelpBox("This mesh has no UV" + uvChannel + ". Select an available UV map.", MessageType.Info);
+        }
+
+        Vector2[] ReadSelectedUvs(Mesh mesh)
+        {
+            var uvs = new System.Collections.Generic.List<Vector2>();
+            if (HasUvChannel(mesh, uvChannel)) mesh.GetUVs(uvChannel, uvs);
+            return uvs.ToArray();
+        }
+
+        void ClearUvBackground()
+        {
+            if (uvBackground == null) return;
+            if (bg == uvBackground) bg = null;
+            DestroyImmediate(uvBackground);
+            uvBackground = null;
+        }
+
         void CacheMesh()
         {
             meshVerts = null; meshUVs = null; meshNorms = null; meshTris = null; meshSkinned = false;
             sceneHits.Clear(); sceneNormals.Clear();
-            if (targetRenderer == null) return;
-            Mesh m = null;
+            SceneView.RepaintAll();
+            Mesh source = FindUvMesh();
+            if (!HasUvChannel(source, uvChannel)) uvChannel = 0;
+            if (source == null) return;
+            Mesh m = source;
             var smr = targetRenderer as SkinnedMeshRenderer;
             if (smr != null) { m = new Mesh(); smr.BakeMesh(m); meshSkinned = true; }
-            else { var mf = targetRenderer.GetComponent<MeshFilter>(); if (mf != null) m = mf.sharedMesh; }
-            if (m == null) return;
-            meshVerts = m.vertices; meshUVs = m.uv; meshNorms = m.normals; meshTris = m.triangles;
+            // UVs belong to the source mesh; baking is only needed for posed positions/normals.
+            meshVerts = m.vertices; meshUVs = ReadSelectedUvs(source); meshNorms = m.normals; meshTris = source.triangles;
+            if (meshSkinned) DestroyImmediate(m);
         }
 
         // Render the mesh's UV islands into a wireframe texture and use it as the background.
         void GenerateUvBackground()
         {
+            CacheMesh();
+            ClearUvBackground();
             Mesh m = FindUvMesh();
             if (m == null)
             {
@@ -1794,10 +1862,10 @@ namespace FurGroomingTool
                     "Assign the mesh's renderer in 'Mesh (renderer)' first (drag the avatar's mesh object from the Hierarchy).", "OK");
                 return;
             }
-            Vector2[] uvs = m.uv; int[] tris = m.triangles;
-            if (uvs == null || uvs.Length == 0)
+            Vector2[] uvs = meshUVs; int[] tris = meshTris;
+            if (uvs == null || uvs.Length == 0 || uvs.Length != m.vertexCount)
             {
-                EditorUtility.DisplayDialog("Fur Grooming Tool", "That mesh has no UV map.", "OK");
+                Repaint();
                 return;
             }
             const int size = 1024;
@@ -1812,7 +1880,8 @@ namespace FurGroomingTool
             }
             var tex = new Texture2D(size, size, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
             tex.SetPixels32(px); tex.Apply();
-            bg = tex;
+            uvBackground = tex;
+            bg = uvBackground;
             Repaint();
         }
 
@@ -1847,7 +1916,7 @@ namespace FurGroomingTool
         void UpdateSceneHit(Vector2 toolUv)
         {
             sceneHits.Clear(); sceneNormals.Clear();
-            if (showOnMesh && targetRenderer != null && meshVerts != null && meshUVs != null && meshUVs.Length > 0)
+            if (showOnMesh && targetRenderer != null && meshVerts != null && meshUVs != null && meshUVs.Length > 0 && meshUVs.Length == meshVerts.Length)
             {
                 Vector2 q = new Vector2(toolUv.x, 1f - toolUv.y); // tool y is top-down; mesh V is bottom-up
                 Transform t = targetRenderer.transform;
