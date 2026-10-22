@@ -2,6 +2,11 @@
 
 All notable changes to this package are documented here.
 
+## [1.2.1] - 2026-10-22
+### Changed
+- The package description now mentions the outfit component, so the Creator Companion card and the
+  listing page say what 1.2.0 added. No code changes.
+
 ## [1.2.0] - 2026-10-22
 ### Added
 - **Fur Outfit Occluder**, a component for an outfit root. One **Bake** collects every mesh under that
