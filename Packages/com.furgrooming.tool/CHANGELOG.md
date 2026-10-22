@@ -2,6 +2,24 @@
 
 All notable changes to this package are documented here.
 
+## [1.2.0] - 2026-10-22
+### Added
+- **Fur Outfit Occluder**, a component for an outfit root. One **Bake** collects every mesh under that
+  root as clothing, reads the groom back out of the maps on the avatar's fur material, runs the
+  occlusion resolver, writes a fresh normal/length/alpha set plus a copy of the fur material that uses
+  them, and builds an animator layer that swaps the copy in while a bool avatar parameter is on - the
+  same parameter the outfit toggle already uses. The source material and its maps are never written
+  to, and the bake refuses to run if the output path would land on a map it reads.
+- The swap layer is named after the fur mesh and material slot rather than the outfit, so outfits
+  share one layer with a state each instead of stacking layers that would override one another. The
+  bool is added to the controller if missing, and the inspector offers the bools already in it, since
+  a mistyped parameter builds a layer that never fires.
+- The fur maps are now a format that reads both ways (`FurMapCodec`), which is what lets the bake work
+  from the material instead of from an open paint window or a groom file. A `Tools > Fur Grooming Tool >
+  Self-check: map codec` menu item round-trips a known groom and reports the worst error.
+- A runtime assembly holds the component and the resolver settings; everything that does work stays
+  editor-only as before.
+
 ## [1.1.0] - 2026-09-15
 ### Added
 - **UV map** dropdown in the paint window. New mesh selections default to UV0; available UV1–UV7 channels can be displayed individually, with the Scene view marker using the same channel.

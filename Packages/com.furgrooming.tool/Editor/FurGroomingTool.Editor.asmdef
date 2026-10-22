@@ -1,7 +1,9 @@
 {
   "name": "FurGroomingTool.Editor",
   "rootNamespace": "FurGroomingTool",
-  "references": [],
+  "references": [
+    "FurGroomingTool"
+  ],
   "includePlatforms": [
     "Editor"
   ],

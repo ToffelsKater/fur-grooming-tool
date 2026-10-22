@@ -153,6 +153,70 @@ UVs are often mirrored, so one texel can land on several places on the body at o
 kept and the worst case wins, otherwise one side ends up groomed against the other side's geometry.
 
 
+## Per-outfit bake: Fur Outfit Occluder
+
+The Collision tab resolves one groom against one set of clothing, in the window. An avatar with
+several outfits wants that per outfit, and wants the result to arrive and leave with the toggle -
+which is what the **Fur Outfit Occluder** component does.
+
+Add it to the **root of an outfit** (`Add Component ▸ Fur Grooming ▸ Fur Outfit Occluder`), check
+the two fields it guessed, and press **Bake**. One press:
+
+1. collects **every mesh under that root** as clothing - nothing to list by hand,
+2. reads the groom back out of the maps already on the avatar's fur material,
+3. runs the same occlusion resolver over it,
+4. writes a fresh normal / length / alpha set and a **copy of the fur material** that uses them,
+5. builds an animator layer that **swaps that copy in while a bool avatar parameter is on** - the
+   same parameter your outfit toggle already uses.
+
+The groom comes from the material, not from the paint window, so the window does not have to be
+open and no groom file has to live beside the scene - the exported maps are the input. The source
+material and its maps are never written to: each outfit gets its own copy, and re-baking after more
+painting picks up the new groom. The bake refuses to run if the output path would land on one of the
+maps it reads.
+
+### Fields
+
+| Field | What it is |
+|-------|------------|
+| Fur mesh / Material slot | The avatar's body renderer and the slot that carries the fur. Guessed when the component is added, by looking for a material with the normal-map property. |
+| Source material | Override for that slot, if the fur material is not the one in it. |
+| Avatar parameter | The bool the outfit toggle already listens to. The swap follows it. Optional. The bools the controller already has are offered in a dropdown, since a typo here fails silently. |
+| FX controller | Where the swap layer is built. Guessed from the Animator on the avatar root. |
+| Avatar root | What the animated paths are relative to - the object with the Animator. Guessed from the hierarchy. |
+| Layer | Name of the swap layer. Empty names it after the fur mesh and slot, which is what lets several outfits share one. |
+| Resolver | The same settings as the Collision tab, kept per outfit. |
+| Material properties | Property names, max angle and Flip G. **Max angle must match** the Direction tab's cap the normal map was painted with, or the groom is read back at the wrong tilt. |
+| Output | Folder, base name and resolution for the maps and the copy. Empty folder means beside the source material. |
+
+Both meshes are read **in their current pose**, so pose the avatar before baking. An outfit that is
+toggled off is switched on for the measurement and switched back afterwards.
+
+### The swap layer
+
+The layer holds a **None** state with the original material - the default state - and one state per
+outfit with that outfit's baked copy. `None -> <outfit>` fires on `If(parameter)`, the way back on
+`IfNot(parameter)`, both instant. The parameter is added to the controller as a Bool if it is not
+there yet; registering it in the avatar's expression parameters and menu is still yours to do, and
+usually already done, since this is the same parameter the outfit toggle uses.
+
+The layer is named after the **fur mesh and material slot**, not after the outfit, so every outfit on
+the avatar shares one layer. That is deliberate: two layers animating one material slot fight, and
+the higher one always wins, which is how per-outfit material swaps usually come apart. Sharing one
+layer means the states take turns. Two outfits worn at once still get only one of the two swaps -
+a single material slot cannot hold both - so an avatar that really wears two fur-covering outfits
+together wants one component covering both, on a shared parent.
+
+Each state's clip is one object-reference key, exactly what the animation window writes when a
+material is dragged onto a renderer slot: no runtime script, and it survives an avatar upload.
+
+### Without a parameter
+
+With no parameter named the bake still produces the maps and the material copy, and says so. Drive
+the copy however you already drive the outfit - your own clip, or a Modular Avatar material setter
+pointed at it.
+
+
 ## Notes
 
 - **Green channel:** `Flip G (Unity/OpenGL)` is on by default (correct for Unity/liltoon). If fur lighting looks inverted, flip it and regenerate.
