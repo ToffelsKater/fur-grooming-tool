@@ -99,6 +99,28 @@
     }
   ]
 
+  outfit_panel = {
+    title: "The component",
+    caption: "the fur mesh, the parameter to follow, and this outfit's own resolver settings. The line at the bottom is the last bake: what it measured, what it trimmed, and where the swap went.",
+    alt: "The Fur Outfit Occluder inspector filled in on an avatar, with the bake report at the bottom",
+    src: "component.png", full: "component.png", w: 689, h: 790
+  }
+
+  outfits = [
+    {
+      tag: "Off", title: "Outfit off",
+      caption: "the groom as painted, fluffy along the whole silhouette.",
+      alt: "The avatar's bare fur with the outfit toggled off, thick along the silhouette",
+      src: "outfit-off.jpg", full: "outfit-off.jpg", w: 1005, h: 743
+    },
+    {
+      tag: "On", title: "Outfit on",
+      caption: "the baked copy swaps in with the outfit. Fur under the straps and the fishnet lies flat instead of pushing through.",
+      alt: "The same spot with the outfit on: the fur lies flat under the straps and the fishnet",
+      src: "outfit-on.jpg", full: "outfit-on.jpg", w: 1005, h: 735
+    }
+  ]
+
   features = [
     { icon: "🧱", title: "Paint layers", body: "Length and Alpha are layer stacks: add, duplicate, reorder, rename, show or hide, opacity, and a blend mode per layer. Try an idea, then keep it or drop it." },
     { icon: "🪞", title: "Symmetry that's actually correct", body: "Mirror left↔right or top↔bottom on an adjustable axis. Direction vectors are <b>flipped</b> across the axis, not just pixel-copied." },
@@ -108,6 +130,7 @@
     { icon: "🔁", title: "Resume any time", body: "Save and load the whole groom, direction field and both layer stacks, or load an existing mask back in to keep editing it." },
     { icon: "🎯", title: "Auto-assign to material", body: "Exports drop onto the right lilToon slot on save, so the result shows up on the avatar immediately." },
     { icon: "🧩", title: "Shader-agnostic", body: "Defaults target lilToon fur, but every target property name is editable, so it works with other shaders too." },
+    { icon: "👕", title: "One bake per outfit", body: "Put the <b>Fur Outfit Occluder</b> on an outfit root and press Bake. It finds the meshes itself, writes its own maps and its own material copy, and leaves the groom underneath untouched, so every outfit can be re-baked on its own." },
     { icon: "🪶", title: "Zero runtime cost", body: "Editor-only. Nothing ships with your avatar: no scripts, no components, no performance rank hit." }
   ]
 
@@ -120,6 +143,8 @@
   faq = [
     { q: "“Add to VCC” doesn't do anything.", a: "The button opens the VRChat Creator Companion, so it has to be installed. You can also add the listing by hand: copy the listing URL, then in the VCC open <b>Settings ▸ Packages ▸ Add Repository</b> and paste it." },
     { q: "Does it work with shaders other than lilToon?", a: "Yes. The defaults target lilToon's fur slots (<code>_FurVectorTex</code>, <code>_FurLengthMask</code>, <code>_FurMask</code>) plus the standard <code>_BumpMap</code>, but every target property name is editable." },
+    { q: "Which parameter does the outfit component listen to?", a: "The same bool your outfit toggle already uses. The component lists the bools your FX controller has so you can pick one, and adds the parameter if it isn't there yet. The swap layer is named after the fur mesh, so several outfits share one layer with a state each." },
+    { q: "Does the outfit component ship with my avatar?", a: "No. It's editor-only and does nothing at runtime. A bake leaves behind two animator states and a material swap, the same thing you would key by hand in the animation window." },
     { q: "Will this affect my avatar's performance rank?", a: "No. It's an editor-only tool: it generates textures and then gets out of the way. No runtime scripts or components ship with your avatar." },
     { q: "Do I need to export a UV map from Blender first?", a: "No. Assign your mesh and the tool renders its UV wireframe as the paint background." },
     { q: "What Unity version do I need?", a: "Unity " + site.unity + " or newer, and a mesh with a UV map. Install it through the Creator Companion, or import the <code>.unitypackage</code> from the GitHub releases." },
@@ -317,6 +342,20 @@
       {{~ for item in collision ~}}
       {{ shot item }}
       {{~ end ~}}
+    </div>
+
+    <div class="sec-head sub rv" id="outfits">
+      <span class="eyebrow">New in 1.2</span>
+      <h2>Every outfit gets its own fur.</h2>
+      <p>The Collision tab resolves one outfit with the window open. The component does the same job from an outfit root: press Bake and it collects every mesh under that root, grooms the fur around them, saves a copy of your fur material with the new maps, and hooks that copy to the bool your outfit toggle already uses.</p>
+    </div>
+    <div class="gal gal-2">
+      {{~ for item in outfits ~}}
+      {{ shot item }}
+      {{~ end ~}}
+    </div>
+    <div class="gal gal-panel">
+      {{ shot outfit_panel }}
     </div>
   </div>
 </section>
