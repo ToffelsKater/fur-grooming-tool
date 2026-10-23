@@ -8,8 +8,11 @@
 // V = 1 - so the maps round-trip with what the window exports and with the way the
 // resolver rasterizes UVs.
 //
-// The encoders are deliberately the same arithmetic as FurGroomingWindow.BuildNormalTex and
-// BuildMaskTex. If one changes, change both, or a baked outfit stops matching the window's
+// Going back out, nothing is re-encoded from the buffers wholesale. The resolver's result is
+// laid over the source map at the source's own size and encoding, and every pixel it does not
+// touch is copied as it was - so a bake only ever trims, and the rest of the groom keeps its
+// detail. Where pixels are written, the arithmetic is the same as FurGroomingWindow.BuildNormalTex
+// and BuildMaskTex. If one changes, change both, or a baked outfit stops matching the window's
 // own preview.
 
 using System.IO;
@@ -22,46 +25,77 @@ namespace FurGroomingTool
     {
         // ------------------------------------------------------------------ encode
 
-        public static Texture2D NormalTex(Vector2[] dir, float[] dirStr, int FN, int res,
-                                          float maxAngle, bool flipG)
+        // The resolver's directions over the source normal map. Only texels it rewrote take the
+        // new direction, blended in across one field texel so the seam does not show; every other
+        // pixel is copied unchanged.
+        public static Texture2D MergeNormal(Texture2D src, Vector2[] dir, float[] dirStr, bool[] changed,
+                                            int FN, float maxAngle, bool flipG)
         {
-            var tex = new Texture2D(res, res, TextureFormat.RGBA32, false);
-            var px = new Color32[res * res];
+            int w = src.width, h = src.height;
+            Color32[] px = src.GetPixels32();
+            var wt = new float[FN * FN];
+            for (int i = 0; i < wt.Length; i++) wt[i] = changed[i] ? 1f : 0f;
             float ang = maxAngle * Mathf.Deg2Rad;
-            for (int irow = 0; irow < res; irow++)
+            for (int y = 0; y < h; y++)
             {
-                float fy = (irow + 0.5f) / res * FN - 0.5f; int outRow = res - 1 - irow;
-                for (int x = 0; x < res; x++)
+                float fy = (1f - (y + 0.5f) / h) * FN - 0.5f; // pixel row 0 is the bottom, field row 0 the top
+                for (int x = 0; x < w; x++)
                 {
-                    float fx = (x + 0.5f) / res * FN - 0.5f;
+                    float fx = (x + 0.5f) / w * FN - 0.5f;
+                    float a = SampleBuf(wt, FN, fx, fy);
+                    if (a <= 0f) continue;
                     Vector2 d; float st;
                     SampleDir(dir, dirStr, FN, fx, fy, out d, out st);
-                    float len = d.magnitude; float nx, ny, nz;
-                    if (len < 1e-4f || st < 1e-4f) { nx = 0; ny = 0; nz = 1; }
-                    else { float t = st * ang, si = Mathf.Sin(t); nx = d.x / len * si; ny = d.y / len * si; nz = Mathf.Cos(t); }
-                    float gy = flipG ? -ny : ny;
-                    px[outRow * res + x] = new Color32(EncN(nx), EncN(gy), EncN(nz), 255);
+                    Vector3 n = Tilt(d, st, ang, flipG);
+                    int k = y * w + x;
+                    Color32 o = px[k];
+                    if (a < 1f)
+                        n = Vector3.Lerp(new Vector3(o.r / 127.5f - 1f, o.g / 127.5f - 1f, o.b / 127.5f - 1f), n, a).normalized;
+                    px[k] = new Color32(EncN(n.x), EncN(n.y), EncN(n.z), o.a);
                 }
             }
-            tex.SetPixels32(px); tex.Apply(); return tex;
+            return ToTex(px, w, h);
         }
 
-        public static Texture2D MaskTex(float[] buf, int MN, int res)
+        // The resolver's length cap over a source mask. A pixel only ever gets shorter: where the
+        // cap is 1, or no lower than what is there already, the source byte is kept. srgb says the
+        // shader linearizes this map, so the cap - a length - is compared and written in that
+        // space. cull instead blacks out wherever the cap leaves no hair, for the alpha mask.
+        public static Texture2D MergeMask(Texture2D src, float[] cap, int FN, bool srgb, bool cull)
         {
-            var tex = new Texture2D(res, res, TextureFormat.RGBA32, false);
-            var px = new Color32[res * res];
-            for (int irow = 0; irow < res; irow++)
+            int w = src.width, h = src.height;
+            Color32[] px = src.GetPixels32();
+            for (int y = 0; y < h; y++)
             {
-                float fy = (irow + 0.5f) / res * MN - 0.5f; int outRow = res - 1 - irow;
-                for (int x = 0; x < res; x++)
+                float fy = (1f - (y + 0.5f) / h) * FN - 0.5f;
+                for (int x = 0; x < w; x++)
                 {
-                    float fx = (x + 0.5f) / res * MN - 0.5f;
-                    byte b = Enc(SampleBuf(buf, MN, fx, fy));
-                    px[outRow * res + x] = new Color32(b, b, b, 255);
+                    float c = SampleBuf(cap, FN, (x + 0.5f) / w * FN - 0.5f, fy);
+                    if (c >= 1f) continue;
+                    int k = y * w + x;
+                    float v = 0f;
+                    if (cull) { if (c >= 0.004f) continue; } // the resolver's own cull line
+                    else
+                    {
+                        if (c >= Lin(px[k].r / 255f, srgb)) continue;
+                        v = srgb ? Mathf.LinearToGammaSpace(c) : c;
+                    }
+                    byte b = Enc(v);
+                    px[k] = new Color32(b, b, b, px[k].a);
                 }
             }
-            tex.SetPixels32(px); tex.Apply(); return tex;
+            return ToTex(px, w, h);
         }
+
+        // Stands in for a map the material does not have: what an empty slot means to the shader.
+        public static Texture2D Blank(int res, Color32 c)
+        {
+            var px = new Color32[res * res];
+            for (int i = 0; i < px.Length; i++) px[i] = c;
+            return ToTex(px, res, res);
+        }
+        public static readonly Color32 FlatNormal = new Color32(128, 128, 255, 255);
+        public static readonly Color32 White = new Color32(255, 255, 255, 255);
 
         // ------------------------------------------------------------------ decode
 
@@ -85,14 +119,32 @@ namespace FurGroomingTool
             }
         }
 
-        public static void DecodeMask(Texture2D tex, float[] buf, int MN)
+        public static void DecodeMask(Texture2D tex, float[] buf, int MN, bool srgb)
         {
             for (int j = 0; j < MN; j++)
             {
                 float v = 1f - (j + 0.5f) / MN;
                 for (int i = 0; i < MN; i++)
-                    buf[j * MN + i] = tex.GetPixelBilinear((i + 0.5f) / MN, v).r;
+                    buf[j * MN + i] = Lin(tex.GetPixelBilinear((i + 0.5f) / MN, v).r, srgb);
             }
+        }
+
+        // Whether the shader sees this map linearized: an sRGB texture in a Linear project. Masks
+        // from an avatar's creator usually keep Unity's sRGB default, and then a grey of 0.5 draws
+        // as 0.21 of the length - read raw, the baked fur would come out more than twice as long.
+        public static bool Linearized(Material m, string prop)
+        {
+            if (m == null || string.IsNullOrEmpty(prop) || !m.HasProperty(prop)) return false;
+            return Linearized(AssetDatabase.GetAssetPath(m.GetTexture(prop)));
+        }
+
+        // The same for an image by project path. A file outside the project has no import
+        // settings to go by, so it is read raw.
+        public static bool Linearized(string assetPath)
+        {
+            if (PlayerSettings.colorSpace != ColorSpace.Linear || string.IsNullOrEmpty(assetPath)) return false;
+            var imp = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            return imp != null && imp.sRGBTexture;
         }
 
         // ------------------------------------------------------------------ assets
@@ -136,7 +188,8 @@ namespace FurGroomingTool
                 Object.DestroyImmediate(t);
         }
 
-        public static string WritePng(Texture2D tex, string path, bool normal)
+        // srgb carries the source map's flag over, so the kept pixels still mean what they meant.
+        public static string WritePng(Texture2D tex, string path, bool normal, bool srgb)
         {
             File.WriteAllBytes(path, tex.EncodeToPNG());
             Object.DestroyImmediate(tex);
@@ -145,7 +198,7 @@ namespace FurGroomingTool
             if (imp != null)
             {
                 imp.textureType = normal ? TextureImporterType.NormalMap : TextureImporterType.Default;
-                imp.sRGBTexture = false;
+                imp.sRGBTexture = srgb;
                 imp.SaveAndReimport();
             }
             return path;
@@ -176,6 +229,21 @@ namespace FurGroomingTool
             return Mathf.Lerp(a, b, ty);
         }
 
+        static Vector3 Tilt(Vector2 d, float st, float ang, bool flipG)
+        {
+            float len = d.magnitude;
+            if (len < 1e-4f || st < 1e-4f) return new Vector3(0f, 0f, 1f);
+            float t = st * ang, si = Mathf.Sin(t), ny = d.y / len * si;
+            return new Vector3(d.x / len * si, flipG ? -ny : ny, Mathf.Cos(t));
+        }
+
+        static Texture2D ToTex(Color32[] px, int w, int h)
+        {
+            var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            tex.SetPixels32(px); tex.Apply(); return tex;
+        }
+
+        static float Lin(float v, bool srgb) { return srgb ? Mathf.GammaToLinearSpace(v) : v; }
         static byte Enc(float v) { return (byte)Mathf.Clamp(Mathf.RoundToInt(v * 255f), 0, 255); }
         static byte EncN(float v) { return (byte)Mathf.Clamp(Mathf.RoundToInt((v * 0.5f + 0.5f) * 255f), 0, 255); }
 
@@ -189,6 +257,7 @@ namespace FurGroomingTool
             const int N = 64, res = 256;
             const float ang = 70f;
             var dir = new Vector2[N * N]; var str = new float[N * N]; var mask = new float[N * N];
+            var all = new bool[N * N];
             for (int j = 0; j < N; j++)
                 for (int i = 0; i < N; i++)
                 {
@@ -198,29 +267,56 @@ namespace FurGroomingTool
                     dir[idx] = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
                     str[idx] = 0.3f + 0.6f * u;
                     mask[idx] = 0.2f + 0.7f * v;
+                    all[idx] = true;
                 }
 
+            // Laid over a blank map everywhere, the groom must come back as itself - in both mask
+            // encodings.
             var dir2 = new Vector2[N * N]; var str2 = new float[N * N]; var mask2 = new float[N * N];
-            Texture2D nt = NormalTex(dir, str, N, res, ang, true);
+            Texture2D flat = Blank(res, FlatNormal), white = Blank(res, White);
+            Texture2D nt = MergeNormal(flat, dir, str, all, N, ang, true);
             DecodeNormal(nt, dir2, str2, N, ang, true);
-            Texture2D mt = MaskTex(mask, N, res);
-            DecodeMask(mt, mask2, N);
-            Object.DestroyImmediate(nt); Object.DestroyImmediate(mt);
+            Object.DestroyImmediate(nt);
 
             float dAng = 0f, dStr = 0f, dMask = 0f;
-            for (int j = 2; j < N - 2; j++)       // the border is a resample edge, not a format test
-                for (int i = 2; i < N - 2; i++)
-                {
-                    int idx = j * N + i;
-                    dAng = Mathf.Max(dAng, Vector2.Angle(dir[idx], dir2[idx]));
-                    dStr = Mathf.Max(dStr, Mathf.Abs(str[idx] - str2[idx]));
-                    dMask = Mathf.Max(dMask, Mathf.Abs(mask[idx] - mask2[idx]));
-                }
+            foreach (bool srgb in new[] { false, true })
+            {
+                Texture2D mt = MergeMask(white, mask, N, srgb, false);
+                DecodeMask(mt, mask2, N, srgb);
+                Object.DestroyImmediate(mt);
+                for (int j = 2; j < N - 2; j++)   // the border is a resample edge, not a format test
+                    for (int i = 2; i < N - 2; i++)
+                    {
+                        int idx = j * N + i;
+                        dAng = Mathf.Max(dAng, Vector2.Angle(dir[idx], dir2[idx]));
+                        dStr = Mathf.Max(dStr, Mathf.Abs(str[idx] - str2[idx]));
+                        dMask = Mathf.Max(dMask, Mathf.Abs(mask[idx] - mask2[idx]));
+                    }
+            }
+            Object.DestroyImmediate(flat); Object.DestroyImmediate(white);
 
-            bool ok = dAng < 2f && dStr < 0.02f && dMask < 0.02f;
+            // And what the bake promises: where the cap is 1 the source survives byte for byte,
+            // and no pixel anywhere gets longer than it was.
+            var cap = new float[N * N];
+            for (int i = 0; i < cap.Length; i++) cap[i] = (i % N) < N / 2 ? 1f : 0.3f;
+            var srcPx = new Color32[res * res];
+            for (int i = 0; i < srcPx.Length; i++) { byte g = (byte)((i * 37) & 255); srcPx[i] = new Color32(g, g, g, 255); }
+            Texture2D srcTex = ToTex(srcPx, res, res), merged = MergeMask(srcTex, cap, N, true, false);
+            Color32[] outPx = merged.GetPixels32();
+            Object.DestroyImmediate(srcTex); Object.DestroyImmediate(merged);
+            int bad = 0, trimmed = 0;
+            for (int i = 0; i < outPx.Length; i++)
+            {
+                bool open = (i % res) < res / 2 - res / N;         // clear of the cap's bilinear edge
+                if (outPx[i].r > srcPx[i].r || (open && outPx[i].r != srcPx[i].r)) bad++;
+                if (outPx[i].r < srcPx[i].r) trimmed++;
+            }
+
+            bool ok = dAng < 2f && dStr < 0.02f && dMask < 0.02f && bad == 0 && trimmed > 0;
             string msg = string.Format("[Fur] codec self-check {0} - worst bearing {1:0.00} deg, " +
-                                       "strength {2:0.0000}, mask {3:0.0000}",
-                                       ok ? "passed" : "FAILED", dAng, dStr, dMask);
+                                       "strength {2:0.0000}, mask {3:0.0000}, {4} pixels changed that " +
+                                       "should not have been, {5} trimmed",
+                                       ok ? "passed" : "FAILED", dAng, dStr, dMask, bad, trimmed);
             if (ok) Debug.Log(msg); else Debug.LogError(msg);
             if (Application.isBatchMode) EditorApplication.Exit(ok ? 0 : 1);
         }

@@ -40,6 +40,8 @@ namespace FurGroomingTool
         public int res;
         public float[] coverage;
         public byte[] hits;
+        public float[] lenCap;  // most of the length mask the clothing leaves room for; 1 = untouched
+        public bool[] changed;  // texels whose direction the resolver rewrote
         public bool Valid { get { return coverage != null; } }
     }
 
@@ -329,6 +331,7 @@ namespace FurGroomingTool
             if (outCoverage != null)
             {
                 outCoverage.res = FN; outCoverage.coverage = coverage; outCoverage.hits = hits;
+                outCoverage.lenCap = lenCap; outCoverage.changed = changed;
             }
 
             if (rep.covered == 0)

@@ -2,6 +2,23 @@
 
 All notable changes to this package are documented here.
 
+## [1.2.2] - 2026-10-23
+### Fixed
+- **Fur Outfit Occluder no longer lengthens fur the outfit does not touch.** Length masks imported as
+  sRGB (Unity's default, and what most avatars ship with) were read raw but written back as linear, so
+  in a Linear project every grey drew longer than before - short fur on fingers or paws came out about
+  twice as long. sRGB masks are now read the way the shader reads them, and the baked mask keeps the
+  source's sRGB setting.
+- The bake now only ever trims. Each map is the source map at its own size with just the resolver's
+  changes laid over it, instead of being rebuilt from the internal buffers at the export resolution,
+  which had blurred the whole groom (a 2048 mask went through 512, a direction map through 256).
+  **Resolution** is now **Size of new maps** and applies only to a map the material does not have.
+- The codec self-check also checks that untouched pixels survive byte for byte and that no pixel
+  gets longer.
+- **Load mask** in the paint window reads an sRGB image from the project the way the shader draws
+  it, so a creator's length mask loaded into a layer and saved back no longer comes out longer.
+  Images outside the project have no import settings and are still read raw.
+
 ## [1.2.1] - 2026-10-22
 ### Changed
 - The package description now mentions the outfit component, so the Creator Companion card and the

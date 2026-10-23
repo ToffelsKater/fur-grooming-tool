@@ -59,7 +59,8 @@ namespace FurGroomingTool
         [Tooltip("Green channel convention. On for Unity/liltoon, as in the paint window.")]
         public bool flipG = true;
 
-        [Tooltip("Resolution of the maps the bake writes.")]
+        [Tooltip("Size of a map the bake has to create because the fur material has none. Maps it " +
+                 "does have are written at their own size.")]
         public int exportRes = 1024;
 
         [Tooltip("Folder for the maps and the material copy. Empty puts them beside the source material.")]

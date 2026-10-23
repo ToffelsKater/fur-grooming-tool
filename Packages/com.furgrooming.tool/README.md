@@ -175,6 +175,11 @@ material and its maps are never written to: each outfit gets its own copy, and r
 painting picks up the new groom. The bake refuses to run if the output path would land on one of the
 maps it reads.
 
+The bake **only ever trims**. Each new map starts as a copy of the source map, at its own size and
+with its own sRGB setting, and only the fur the outfit reaches is changed: lengths can only get
+shorter, and directions change only where the resolver leaned the fur. Everywhere else the copy is
+the original, pixel for pixel.
+
 ### Fields
 
 | Field | What it is |
@@ -187,7 +192,7 @@ maps it reads.
 | Layer | Name of the swap layer. Empty names it after the fur mesh and slot, which is what lets several outfits share one. |
 | Resolver | The same settings as the Collision tab, kept per outfit. |
 | Material properties | Property names, max angle and Flip G. **Max angle must match** the Direction tab's cap the normal map was painted with, or the groom is read back at the wrong tilt. |
-| Output | Folder, base name and resolution for the maps and the copy. Empty folder means beside the source material. |
+| Output | Folder and base name for the maps and the copy. Empty folder means beside the source material. **Size of new maps** applies only to a map the material does not have yet; existing maps keep their size. |
 
 Both meshes are read **in their current pose**, so pose the avatar before baking. An outfit that is
 toggled off is switched on for the measurement and switched back afterwards.

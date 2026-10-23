@@ -1589,6 +1589,9 @@ namespace FurGroomingTool
             if (string.IsNullOrEmpty(p)) return;
             var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
             if (!tex.LoadImage(File.ReadAllBytes(p))) { Object.DestroyImmediate(tex); Debug.LogError("[Fur] Could not load image: " + p); return; }
+            // An sRGB mask in the project draws linearized, and the layers are linear - read it the
+            // way the shader does, or every grey comes back longer than it was drawn.
+            bool srgb = FurMapCodec.Linearized(AbsoluteToProject(p));
             PushUndoActive();
             for (int y = 0; y < MN; y++)
             {
@@ -1596,14 +1599,15 @@ namespace FurGroomingTool
                 for (int x = 0; x < MN; x++)
                 {
                     int idx = y * MN + x;
-                    L.value[idx] = tex.GetPixelBilinear(x / (float)(MN - 1), v).r;
+                    float r = tex.GetPixelBilinear(x / (float)(MN - 1), v).r;
+                    L.value[idx] = srgb ? Mathf.GammaToLinearSpace(r) : r;
                     L.cover[idx] = 255;
                 }
             }
             Object.DestroyImmediate(tex);
             st.MarkDirty();
             maskDirty = true; Repaint();
-            Debug.Log("[Fur] Loaded mask <- " + p);
+            Debug.Log("[Fur] Loaded mask <- " + p + (srgb ? " (sRGB, linearized)" : ""));
         }
 
         // =========================================================== helpers
