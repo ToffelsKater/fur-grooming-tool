@@ -222,6 +222,32 @@ the copy however you already drive the outfit - your own clip, or a Modular Avat
 pointed at it.
 
 
+## Outfit materials panel
+
+The component above bakes one outfit and builds the swap for you. If something else already does the
+swapping, such as **VRC-Fury**, use the panel instead: it bakes every outfit in one press and adds
+nothing to the avatar. Open it from `Tools ▸ Fur Outfit Materials`.
+
+1. Set the **Body mesh** and the **Base fur material**. If the material is empty when you pick the
+   mesh, the first material on it with the normal-map property is filled in.
+2. Drag your **outfit roots** into the list. Every mesh under a root counts as that outfit's clothing,
+   and outfits that are toggled off are switched on for the measurement and back off afterwards.
+3. Pose the avatar and press **Bake outfit materials**.
+
+Each outfit gets a copy of the base material with its own length and normal maps, named
+`<material>_<outfit>`, beside the base material unless **Output ▸ Folder** says otherwise. The list
+under the button shows each result. Drag a material from there straight into your swap.
+
+With VRC-Fury, add a **Material Swap** action to the outfit's toggle, pointing at the body mesh and
+the fur material's slot, with that outfit's material. Pressing Bake again after more painting updates
+the same materials and maps in place, so those swaps keep working.
+
+The resolver settings are the same as on the component and are shared by every outfit in the list.
+They default to leaving the alpha mask alone; tick **Culled fur -> alpha black** to write one per
+outfit as well. A slot holds one material at a time, so two outfits worn together want one root
+covering both. The panel's list and settings last until it is closed. The materials stay.
+
+
 ## Notes
 
 - **Green channel:** `Flip G (Unity/OpenGL)` is on by default (correct for Unity/liltoon). If fur lighting looks inverted, flip it and regenerate.

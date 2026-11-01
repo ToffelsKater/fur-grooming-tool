@@ -29,11 +29,15 @@ namespace FurGroomingTool
 
         public static List<Renderer> CollectOutfit(FurOutfitOccluder c)
         {
+            return c == null ? new List<Renderer>() : CollectOutfit(c.gameObject, c.furRenderer);
+        }
+
+        public static List<Renderer> CollectOutfit(GameObject root, Renderer fur)
+        {
             var list = new List<Renderer>();
-            if (c == null) return list;
-            foreach (Renderer r in c.GetComponentsInChildren<Renderer>(true))
+            foreach (Renderer r in root.GetComponentsInChildren<Renderer>(true))
             {
-                if (r == c.furRenderer) continue;
+                if (r == fur) continue;
                 if (!(r is SkinnedMeshRenderer) && r.GetComponent<MeshFilter>() == null) continue;
                 if (!list.Contains(r)) list.Add(r);
             }
@@ -51,86 +55,19 @@ namespace FurGroomingTool
             List<Renderer> cloth = CollectOutfit(c);
             if (cloth.Count == 0) return Fail(c, "No meshes found under " + c.name + ". Put this component on the outfit root.");
 
-            string folder = OutputFolder(c, src);
+            string folder = OutputFolder(c.outputFolder, src);
             if (folder == null) return Fail(c, "Output folder must be inside this project's Assets folder.");
             string b = BaseName(c);
 
-            // The groom lives in the maps. Whatever is missing starts at "fur everywhere, full
-            // length, straight out", which is what an unpainted channel means to the shader too.
-            var dir = new Vector2[FN * FN];
-            var dirStr = new float[FN * FN];
-            var len = new float[MN * MN];
-            for (int i = 0; i < len.Length; i++) len[i] = 1f;
-
-            string err;
-            Texture2D nrmMap = FurMapCodec.LoadMap(src, c.normalProp, true, out err);
-            if (err != null) return Fail(c, err);
-            Texture2D lenMap = FurMapCodec.LoadMap(src, c.lengthProp, false, out err);
-            if (err != null) { FurMapCodec.Release(nrmMap); return Fail(c, err); }
-            Texture2D alphaMap = FurMapCodec.LoadMap(src, c.alphaProp, false, out err);
-            if (err != null) { FurMapCodec.Release(nrmMap); FurMapCodec.Release(lenMap); return Fail(c, err); }
-
-            // Refuse to write over the maps we just read: that would make the first bake
-            // irreversible and every later one cumulative.
-            string clash = Clash(folder, b, nrmMap, lenMap, alphaMap, src, c);
-            if (clash != null)
-            {
-                FurMapCodec.Release(nrmMap); FurMapCodec.Release(lenMap); FurMapCodec.Release(alphaMap);
-                return Fail(c, clash);
-            }
-
-            FurOcclusionSettings s = c.occlusion.Clone();
-            s.collectDebug = false;
-            bool lenSrgb = FurMapCodec.Linearized(src, c.lengthProp);
-            bool alphaSrgb = FurMapCodec.Linearized(src, c.alphaProp);
+            Material baked = c.bakedMaterial;
             FurOcclusionReport rep;
-            string nPath, lPath, aPath;
-            try
-            {
-                if (nrmMap != null) FurMapCodec.DecodeNormal(nrmMap, dir, dirStr, FN, c.maxAngle, c.flipG);
-                if (lenMap != null) FurMapCodec.DecodeMask(lenMap, len, MN, lenSrgb);
-
-                // An outfit is usually sitting toggled off while it is being set up, and a disabled
-                // renderer has nothing dependable to bake a posed mesh from. Switch it on for the
-                // measurement and put it back exactly as it was.
-                bool wasActive = c.gameObject.activeSelf;
-                var cov = new FurCoverage();
-                if (!wasActive) c.gameObject.SetActive(true);
-                try
-                {
-                    rep = FurOcclusionResolver.Resolve(
-                        c.furRenderer, cloth, dir, dirStr, FN,
-                        len, null, MN,
-                        c.maxAngle, c.flipG, s, cov, null);
-                }
-                finally { if (!wasActive) c.gameObject.SetActive(false); }
-
-                if (rep.error != null) return Fail(c, rep.error);
-                if (rep.canceled) return Fail(c, "Canceled. Nothing was written.");
-
-                // A map the material lacks starts blank, at the export size.
-                int res = Mathf.Clamp(Mathf.ClosestPowerOfTwo(c.exportRes), 64, 4096);
-                if (nrmMap == null) nrmMap = FurMapCodec.Blank(res, FurMapCodec.FlatNormal);
-                if (lenMap == null) lenMap = FurMapCodec.Blank(res, FurMapCodec.White);
-                if (alphaMap == null && s.writeAlpha) alphaMap = FurMapCodec.Blank(res, FurMapCodec.White);
-
-                nPath = FurMapCodec.WritePng(FurMapCodec.MergeNormal(nrmMap, dir, dirStr, cov.changed, FN, c.maxAngle, c.flipG),
-                                             folder + "/" + b + "_Normal.png", true, false);
-                lPath = FurMapCodec.WritePng(FurMapCodec.MergeMask(lenMap, cov.lenCap, FN, lenSrgb, false),
-                                             folder + "/" + b + "_Length.png", false, lenSrgb);
-                aPath = s.writeAlpha
-                    ? FurMapCodec.WritePng(FurMapCodec.MergeMask(alphaMap, cov.lenCap, FN, alphaSrgb, true),
-                                           folder + "/" + b + "_Alpha.png", false, alphaSrgb)
-                    : null;
-            }
-            finally { FurMapCodec.Release(nrmMap); FurMapCodec.Release(lenMap); FurMapCodec.Release(alphaMap); }
+            string error = BakeMaps(c.furRenderer, src, cloth, c.gameObject, c.occlusion,
+                                    c.normalProp, c.lengthProp, c.alphaProp, c.maxAngle, c.flipG, c.exportRes,
+                                    folder, b, ref baked, out rep);
+            if (error != null) return Fail(c, error);
 
             Undo.RecordObject(c, "Bake outfit fur");
-            Material baked = EnsureCopy(c, src, folder + "/" + b + ".mat");
-            Assign(baked, c.normalProp, nPath);
-            Assign(baked, c.lengthProp, lPath);
-            Assign(baked, c.alphaProp, aPath);
-            EditorUtility.SetDirty(baked);
+            c.bakedMaterial = baked;
 
             string toggle = Wire(c, baked, src, folder, b);
             AssetDatabase.SaveAssets();
@@ -143,11 +80,98 @@ namespace FurGroomingTool
             return true;
         }
 
+        // Steps 2 to 4, for one outfit: everything but the swap. Returns why nothing was written,
+        // or null. baked is the copy to update; left null, the one at the output path is reused,
+        // so a re-bake keeps the asset anything else already points at. Saving is the caller's.
+        public static string BakeMaps(Renderer fur, Material src, List<Renderer> cloth, GameObject outfitRoot,
+                                      FurOcclusionSettings settings,
+                                      string normalProp, string lengthProp, string alphaProp,
+                                      float maxAngle, bool flipG, int exportRes,
+                                      string folder, string b, ref Material baked, out FurOcclusionReport rep)
+        {
+            rep = null;
+
+            // The groom lives in the maps. Whatever is missing starts at "fur everywhere, full
+            // length, straight out", which is what an unpainted channel means to the shader too.
+            var dir = new Vector2[FN * FN];
+            var dirStr = new float[FN * FN];
+            var len = new float[MN * MN];
+            for (int i = 0; i < len.Length; i++) len[i] = 1f;
+
+            string err;
+            Texture2D nrmMap = FurMapCodec.LoadMap(src, normalProp, true, out err);
+            if (err != null) return err;
+            Texture2D lenMap = FurMapCodec.LoadMap(src, lengthProp, false, out err);
+            if (err != null) { FurMapCodec.Release(nrmMap); return err; }
+            Texture2D alphaMap = FurMapCodec.LoadMap(src, alphaProp, false, out err);
+            if (err != null) { FurMapCodec.Release(nrmMap); FurMapCodec.Release(lenMap); return err; }
+
+            // Refuse to write over the maps we just read: that would make the first bake
+            // irreversible and every later one cumulative.
+            string clash = Clash(folder, b, nrmMap, lenMap, alphaMap, src, normalProp, lengthProp, alphaProp);
+            if (clash != null)
+            {
+                FurMapCodec.Release(nrmMap); FurMapCodec.Release(lenMap); FurMapCodec.Release(alphaMap);
+                return clash;
+            }
+
+            FurOcclusionSettings s = settings.Clone();
+            s.collectDebug = false;
+            bool lenSrgb = FurMapCodec.Linearized(src, lengthProp);
+            bool alphaSrgb = FurMapCodec.Linearized(src, alphaProp);
+            string nPath, lPath, aPath;
+            try
+            {
+                if (nrmMap != null) FurMapCodec.DecodeNormal(nrmMap, dir, dirStr, FN, maxAngle, flipG);
+                if (lenMap != null) FurMapCodec.DecodeMask(lenMap, len, MN, lenSrgb);
+
+                // An outfit is usually sitting toggled off while it is being set up, and a disabled
+                // renderer has nothing dependable to bake a posed mesh from. Switch it on for the
+                // measurement and put it back exactly as it was.
+                bool wasActive = outfitRoot.activeSelf;
+                var cov = new FurCoverage();
+                if (!wasActive) outfitRoot.SetActive(true);
+                try
+                {
+                    rep = FurOcclusionResolver.Resolve(
+                        fur, cloth, dir, dirStr, FN,
+                        len, null, MN,
+                        maxAngle, flipG, s, cov, null);
+                }
+                finally { if (!wasActive) outfitRoot.SetActive(false); }
+
+                if (rep.error != null) return rep.error;
+                if (rep.canceled) return "Canceled. Nothing was written.";
+
+                // A map the material lacks starts blank, at the export size.
+                int res = Mathf.Clamp(Mathf.ClosestPowerOfTwo(exportRes), 64, 4096);
+                if (nrmMap == null) nrmMap = FurMapCodec.Blank(res, FurMapCodec.FlatNormal);
+                if (lenMap == null) lenMap = FurMapCodec.Blank(res, FurMapCodec.White);
+                if (alphaMap == null && s.writeAlpha) alphaMap = FurMapCodec.Blank(res, FurMapCodec.White);
+
+                nPath = FurMapCodec.WritePng(FurMapCodec.MergeNormal(nrmMap, dir, dirStr, cov.changed, FN, maxAngle, flipG),
+                                             folder + "/" + b + "_Normal.png", true, false);
+                lPath = FurMapCodec.WritePng(FurMapCodec.MergeMask(lenMap, cov.lenCap, FN, lenSrgb, false),
+                                             folder + "/" + b + "_Length.png", false, lenSrgb);
+                aPath = s.writeAlpha
+                    ? FurMapCodec.WritePng(FurMapCodec.MergeMask(alphaMap, cov.lenCap, FN, alphaSrgb, true),
+                                           folder + "/" + b + "_Alpha.png", false, alphaSrgb)
+                    : null;
+            }
+            finally { FurMapCodec.Release(nrmMap); FurMapCodec.Release(lenMap); FurMapCodec.Release(alphaMap); }
+
+            baked = EnsureCopy(baked, src, folder + "/" + b + ".mat");
+            Assign(baked, normalProp, nPath);
+            Assign(baked, lengthProp, lPath);
+            Assign(baked, alphaProp, aPath);
+            EditorUtility.SetDirty(baked);
+            return null;
+        }
+
         // ------------------------------------------------------------------ pieces
 
-        static Material EnsureCopy(FurOutfitOccluder c, Material src, string path)
+        static Material EnsureCopy(Material baked, Material src, string path)
         {
-            Material baked = c.bakedMaterial;
             if (baked == null) baked = AssetDatabase.LoadAssetAtPath<Material>(path);
             if (baked == null)
             {
@@ -161,7 +185,6 @@ namespace FurGroomingTool
                 if (baked.shader != src.shader) baked.shader = src.shader;
                 baked.CopyPropertiesFromMaterial(src);
             }
-            c.bakedMaterial = baked;
             return baked;
         }
 
@@ -297,7 +320,7 @@ namespace FurGroomingTool
         }
 
         static string Clash(string folder, string b, Texture2D nrm, Texture2D len, Texture2D alpha,
-                            Material src, FurOutfitOccluder c)
+                            Material src, string normalProp, string lengthProp, string alphaProp)
         {
             var outPaths = new[] { folder + "/" + b + "_Normal.png", folder + "/" + b + "_Length.png",
                                    folder + "/" + b + "_Alpha.png" };
@@ -305,7 +328,7 @@ namespace FurGroomingTool
             foreach (Texture2D t in new[] { nrm, len, alpha })
                 if (t != null) ins.Add(AssetDatabase.GetAssetPath(t));
             // LoadMap hands back a detached copy, so ask the material for the real assets too.
-            foreach (string prop in new[] { c.normalProp, c.lengthProp, c.alphaProp })
+            foreach (string prop in new[] { normalProp, lengthProp, alphaProp })
                 if (!string.IsNullOrEmpty(prop) && src.HasProperty(prop))
                     ins.Add(AssetDatabase.GetAssetPath(src.GetTexture(prop)));
 
@@ -319,9 +342,9 @@ namespace FurGroomingTool
             return null;
         }
 
-        static string OutputFolder(FurOutfitOccluder c, Material src)
+        public static string OutputFolder(string folder, Material src)
         {
-            string f = (c.outputFolder ?? "").Replace('\\', '/').TrimEnd('/');
+            string f = (folder ?? "").Replace('\\', '/').TrimEnd('/');
             if (f.Length == 0)
             {
                 string p = AssetDatabase.GetAssetPath(src);
@@ -334,9 +357,14 @@ namespace FurGroomingTool
 
         static string BaseName(FurOutfitOccluder c)
         {
-            string n = string.IsNullOrEmpty(c.mapName) ? c.name + "_Fur" : c.mapName;
+            string n = CleanName(string.IsNullOrEmpty(c.mapName) ? c.name + "_Fur" : c.mapName);
+            return n.Length == 0 ? "Outfit_Fur" : n;
+        }
+
+        public static string CleanName(string n)
+        {
             foreach (char bad in System.IO.Path.GetInvalidFileNameChars()) n = n.Replace(bad, '_');
-            return n.Trim().Length == 0 ? "Outfit_Fur" : n.Trim();
+            return n.Trim();
         }
 
         static bool Fail(FurOutfitOccluder c, string msg)
@@ -401,24 +429,7 @@ namespace FurGroomingTool
             if (foldResolver)
             {
                 EditorGUI.indentLevel++;
-                P("occlusion.furLengthMm", "Fur length (mm)",
-                  "World length of a hair where the length mask is fully white. Match your shader, or the shadow is measured over the wrong distance.");
-                P("occlusion.clothThicknessMm", "Cloth thickness (mm)",
-                  "Fattens the clothing in every direction. Raise it if fur slips through thin or badly fitted garments.");
-                P("occlusion.lengthMarginMm", "Length margin (mm)",
-                  "Slack kept between the fur tip and the clothing. Raise it if fur is clean in the editor but pokes through once the body moves.");
-                var q = serializedObject.FindProperty("occlusion.rayQuality");
-                q.intValue = EditorGUILayout.IntPopup("Ray quality", q.intValue,
-                    new[] { "Fast (11 rays)", "Medium (25 rays)", "Fine (55 rays)" }, new[] { 0, 1, 2 });
-                P("occlusion.maxTiltAngle", "Max tilt angle",
-                  "Hard cap on how far a hair may lean from the surface normal. Also limited by the angle below, since that is all the normal map can encode.");
-                P("occlusion.shadowThreshold", "Shadow threshold",
-                  "How shadowed a spot must be before its fur is touched at all.");
-                P("occlusion.combStrength", "Comb into open space",
-                  "How hard the fur is steered towards where there is still room. 0 keeps the groom and only shortens.");
-                P("occlusion.smoothPasses", "Smooth result", "3x3 blur passes over the texels the resolver touched.");
-                P("occlusion.writeAlpha", "Culled fur -> alpha black",
-                  "Punch fully trimmed fur out of the alpha mask, so no shell is drawn there at all.");
+                DrawResolver(serializedObject);
                 EditorGUI.indentLevel--;
             }
 
@@ -426,11 +437,7 @@ namespace FurGroomingTool
             if (foldProps)
             {
                 EditorGUI.indentLevel++;
-                P("normalProp", "Normal map");
-                P("lengthProp", "Length mask");
-                P("alphaProp", "Alpha mask");
-                P("maxAngle", "Max angle (deg)");
-                P("flipG", "Flip G (Unity/OpenGL)");
+                DrawMapProps(serializedObject);
                 EditorGUI.indentLevel--;
             }
 
@@ -440,7 +447,7 @@ namespace FurGroomingTool
                 EditorGUI.indentLevel++;
                 EditorGUILayout.BeginHorizontal();
                 P("outputFolder", "Folder");
-                if (GUILayout.Button("...", GUILayout.Width(26))) Browse(c);
+                if (GUILayout.Button("...", GUILayout.Width(26))) Browse(serializedObject);
                 EditorGUILayout.EndHorizontal();
                 P("mapName", "Base name");
                 var r = serializedObject.FindProperty("exportRes");
@@ -495,7 +502,38 @@ namespace FurGroomingTool
             p.intValue = EditorGUILayout.IntPopup("Material slot", Mathf.Clamp(p.intValue, 0, ms.Length - 1), labels, values);
         }
 
-        void Browse(FurOutfitOccluder c)
+        internal static void DrawResolver(SerializedObject so)
+        {
+            Prop(so, "occlusion.furLengthMm", "Fur length (mm)",
+              "World length of a hair where the length mask is fully white. Match your shader, or the shadow is measured over the wrong distance.");
+            Prop(so, "occlusion.clothThicknessMm", "Cloth thickness (mm)",
+              "Fattens the clothing in every direction. Raise it if fur slips through thin or badly fitted garments.");
+            Prop(so, "occlusion.lengthMarginMm", "Length margin (mm)",
+              "Slack kept between the fur tip and the clothing. Raise it if fur is clean in the editor but pokes through once the body moves.");
+            var q = so.FindProperty("occlusion.rayQuality");
+            q.intValue = EditorGUILayout.IntPopup("Ray quality", q.intValue,
+                new[] { "Fast (11 rays)", "Medium (25 rays)", "Fine (55 rays)" }, new[] { 0, 1, 2 });
+            Prop(so, "occlusion.maxTiltAngle", "Max tilt angle",
+              "Hard cap on how far a hair may lean from the surface normal. Also limited by the angle below, since that is all the normal map can encode.");
+            Prop(so, "occlusion.shadowThreshold", "Shadow threshold",
+              "How shadowed a spot must be before its fur is touched at all.");
+            Prop(so, "occlusion.combStrength", "Comb into open space",
+              "How hard the fur is steered towards where there is still room. 0 keeps the groom and only shortens.");
+            Prop(so, "occlusion.smoothPasses", "Smooth result", "3x3 blur passes over the texels the resolver touched.");
+            Prop(so, "occlusion.writeAlpha", "Culled fur -> alpha black",
+              "Punch fully trimmed fur out of the alpha mask, so no shell is drawn there at all.");
+        }
+
+        internal static void DrawMapProps(SerializedObject so)
+        {
+            Prop(so, "normalProp", "Normal map");
+            Prop(so, "lengthProp", "Length mask");
+            Prop(so, "alphaProp", "Alpha mask");
+            Prop(so, "maxAngle", "Max angle (deg)");
+            Prop(so, "flipG", "Flip G (Unity/OpenGL)");
+        }
+
+        internal static void Browse(SerializedObject so)
         {
             string start = Application.dataPath;
             string picked = EditorUtility.OpenFolderPanel("Choose output folder (inside Assets)", start, "");
@@ -508,12 +546,17 @@ namespace FurGroomingTool
                 EditorUtility.DisplayDialog("Fur Outfit Occluder", "Pick a folder inside this project's Assets folder.", "OK");
                 return;
             }
-            serializedObject.FindProperty("outputFolder").stringValue = rel;
+            so.FindProperty("outputFolder").stringValue = rel;
         }
 
         void P(string path, string label = null, string tip = null)
         {
-            var p = serializedObject.FindProperty(path);
+            Prop(serializedObject, path, label, tip);
+        }
+
+        internal static void Prop(SerializedObject so, string path, string label = null, string tip = null)
+        {
+            var p = so.FindProperty(path);
             if (p == null) return;
             if (label == null) EditorGUILayout.PropertyField(p);
             else EditorGUILayout.PropertyField(p, new GUIContent(label, tip ?? p.tooltip));

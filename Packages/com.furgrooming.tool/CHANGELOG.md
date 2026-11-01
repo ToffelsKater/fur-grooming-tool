@@ -2,6 +2,15 @@
 
 All notable changes to this package are documented here.
 
+## [1.3.0] - 2026-11-01
+### Added
+- **Fur Outfit Materials** panel (`Tools > Fur Outfit Materials`). Set a body mesh, a base fur material
+  and any number of outfit roots, and one press makes a fur material per outfit with its own length and
+  normal maps, ready to swap in with VRC-Fury or your own toggle. It adds nothing to the avatar and
+  builds no animator layer. A re-bake updates the same assets, so existing swaps keep working.
+- A `Tools > Fur Grooming Tool > Self-check: outfit materials` menu item that runs the panel's bake on
+  a small generated scene and removes it again.
+
 ## [1.2.2] - 2026-10-23
 ### Fixed
 - **Fur Outfit Occluder no longer lengthens fur the outfit does not touch.** Length masks imported as

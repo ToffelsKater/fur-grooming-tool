@@ -1,8 +1,8 @@
 {
   "name": "com.furgrooming.tool",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "displayName": "Fur Grooming Tool",
-  "description": "Paint fur direction, length, and presence over a UV layout and export liltoon-ready normal/length/alpha textures. A component on an outfit root grooms the fur out from under that outfit and swaps the result in with its toggle. Editor-only.",
+  "description": "Paint fur direction, length, and presence over a UV layout and export liltoon-ready normal/length/alpha textures. A component on an outfit root grooms the fur out from under that outfit and swaps the result in with its toggle, and a panel bakes a fur material per outfit to swap in with VRC-Fury. Editor-only.",
   "unity": "2019.4",
   "author": { "name": "ToffelsKater" },
   "license": "MIT",
