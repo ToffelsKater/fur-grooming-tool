@@ -171,7 +171,21 @@ namespace FurGroomingTool
         void OnGUI()
         {
             HandleShortcuts();
+            EditorGUILayout.BeginHorizontal();
             Tab nt = (Tab)GUILayout.Toolbar((int)tab, new[] { "Direction", "Length", "Alpha", "Collision" });
+            if (ColorButton(new GUIContent("Default values",
+                    "Puts every setting on every tab back to its default. The groom, the meshes, the material, " +
+                    "and the output folder and file name are kept."), colGray, GUILayout.Width(110)))
+            {
+                // Settings are not on the undo stack, and this sits right beside the tabs.
+                if (EditorUtility.DisplayDialog("Fur Grooming Tool",
+                        "Put every setting on every tab back to its default?\n\nThe groom, the meshes, the " +
+                        "material, and the output folder and file name are kept. This cannot be undone.",
+                        "Reset", "Cancel"))
+                { ResetValues(); GUI.FocusControl(null); }
+                GUIUtility.ExitGUI();   // the dialog ran its own GUI loop; this pass's layout is gone
+            }
+            EditorGUILayout.EndHorizontal();
             if (nt != tab) { tab = nt; maskDirty = true; }
 
             if (tab == Tab.Collision) { DrawCollisionTab(); return; }
@@ -210,6 +224,27 @@ namespace FurGroomingTool
         }
 
         static bool Foldout(bool state, string title) => EditorGUILayout.Foldout(state, title, true);
+
+        // "Default values". The defaults are the field initializers at the top, so they are read
+        // off a throwaway instance instead of being kept twice. Only settings go back: the groom,
+        // the mesh, the material, the clothing list and where the files go are not settings.
+        void ResetValues()
+        {
+            FurGroomingWindow d = CreateInstance<FurGroomingWindow>();
+            dirMode = d.dirMode; furStrength = d.furStrength; maxAngle = d.maxAngle; flipG = d.flipG;
+            arrowColor = d.arrowColor; showArrows = d.showArrows;
+            lenMode = d.lenMode; lenValue = d.lenValue;
+            alphaMode = d.alphaMode; alphaThreshold = d.alphaThreshold; alphaAA = d.alphaAA;
+            showOnMesh = d.showOnMesh; markerShape = d.markerShape; markerColor = d.markerColor; markerSize = d.markerSize;
+            followCam = d.followCam; alignToNormal = d.alignToNormal; camDistance = d.camDistance; fov = d.fov;
+            normalProp = d.normalProp; lengthProp = d.lengthProp; alphaProp = d.alphaProp;
+            brushSize = d.brushSize; brushFlow = d.brushFlow; brushHardness = d.brushHardness; bgOpacity = d.bgOpacity;
+            smoothRadius = d.smoothRadius; exportRes = d.exportRes; mirrorDir = d.mirrorDir; symAxis = d.symAxis;
+            zoom = d.zoom; panCenter = d.panCenter;
+            occl = d.occl; debugDraw = d.debugDraw; debugChangedOnly = d.debugChangedOnly; debugBudget = d.debugBudget;
+            DestroyImmediate(d);
+            RefreshResolverMaps();   // the previews are drawn with the tilt cap, flip G and alpha threshold
+        }
 
         void DrawSettings()
         {
@@ -623,6 +658,14 @@ namespace FurGroomingTool
             Renderer rendNew = (Renderer)EditorGUILayout.ObjectField(new GUIContent("Fur mesh",
                 "The mesh the fur grows on. Same renderer as on the paint tabs."), targetRenderer, typeof(Renderer), true);
             if (rendNew != targetRenderer) SetTargetRenderer(rendNew);
+            targetMat = (Material)EditorGUILayout.ObjectField(new GUIContent("Fur material",
+                "The material the maps are assigned to, and the one an unpainted mask is read from. Same field as " +
+                "Target material on the paint tabs. Left empty, Resolve picks the fur mesh's own fur material."),
+                targetMat, typeof(Material), false);
+            if (targetMat != null && targetRenderer != null &&
+                System.Array.IndexOf(targetRenderer.sharedMaterials, targetMat) < 0)
+                EditorGUILayout.HelpBox(targetMat.name + " is not on " + targetRenderer.name +
+                    ". Maps are still read from it and assigned to it.", MessageType.Warning);
 
             EditorGUILayout.LabelField("Clothing meshes");
             EditorGUI.indentLevel++;
@@ -721,6 +764,24 @@ namespace FurGroomingTool
             if (cloth.Count == 0)
             { EditorUtility.DisplayDialog("Fur Grooming Tool", "Add at least one clothing renderer.", "OK"); return; }
 
+            // The maps have to be on a material to show on the avatar. One set by hand wins;
+            // otherwise it is whichever of the fur mesh's materials has the fur properties.
+            if (targetMat == null)
+                foreach (Material m in targetRenderer.sharedMaterials)
+                    if (m != null && (m.HasProperty(lengthProp) || m.HasProperty(normalProp))) { targetMat = m; break; }
+
+            // Ahead of the copies below, so Revert and undo return to the groom this resolve started
+            // from. Going back to an empty canvas instead would have the next run start from the maps
+            // this one saves, and trim what is already trimmed.
+            string seedErr = SeedUnpainted(lenStack, lengthProp);
+            if (seedErr == null && occl.writeAlpha) seedErr = SeedUnpainted(alphaStack, alphaProp);
+            if (seedErr != null)
+            {
+                resolveMsg = seedErr;
+                EditorUtility.DisplayDialog("Fur Grooming Tool", seedErr, "OK");
+                return;
+            }
+
             preDir = (Vector2[])dir.Clone(); preDirStr = (float[])dirStr.Clone();
             preLenStack = lenStack.CloneDeep(); preAlphaStack = alphaStack.CloneDeep();
             hasPreResolve = true;
@@ -762,6 +823,52 @@ namespace FurGroomingTool
             if (coverageTex != null) DestroyImmediate(coverageTex);
             coverageTex = FurOcclusionResolver.CoverageTexture(coverage);
             RefreshResolverMaps();
+
+            if (!rep.canceled && rep.groomed > 0 && SaveMissingMaps())
+                resolveMsg += "\n" + targetMat.name + " had empty map slots. The maps for them were written and assigned.";
+        }
+
+        // The resolver works on the canvas, and an unpainted canvas is black: no fur at all. That is
+        // not what the avatar draws - to the shader an empty slot is fur everywhere at full length,
+        // and a filled one is the mask the avatar came with. So a mask nobody has painted is first
+        // read off the fur material, or filled white where the material has none.
+        // Returns why it could not be, or null.
+        string SeedUnpainted(MaskLayerStack st, string prop)
+        {
+            if (!st.Unpainted()) return null;
+            string err;
+            Texture2D map = FurMapCodec.LoadMap(targetMat, prop, false, out err);
+            if (err != null) return err;
+
+            MaskLayer L = st.layers.Find(x => !x.isResolver);
+            if (L == null) st.layers.Insert(0, L = new MaskLayer("Base", MN * MN));
+            L.visible = true; L.opacity = 1f; L.blend = MaskBlend.Normal;
+            for (int i = 0; i < L.value.Length; i++) { L.value[i] = 1f; L.cover[i] = 255; }
+            if (map != null)
+            {
+                FurMapCodec.DecodeMask(map, L.value, MN, FurMapCodec.Linearized(targetMat, prop));
+                FurMapCodec.Release(map);
+            }
+            st.MarkDirty(); maskDirty = true;
+            return null;
+        }
+
+        // A slot the material has nothing in gets its map written and assigned on the spot: left
+        // empty, the avatar would go on drawing the fur as it was before the resolve. A filled slot
+        // is only ever written by the save buttons.
+        bool SaveMissingMaps()
+        {
+            if (targetMat == null) return false;
+            bool any = false;
+            foreach (Tab t in new[] { Tab.Direction, Tab.Length, Tab.Alpha })
+            {
+                if (t == Tab.Alpha && !occl.writeAlpha) continue;
+                string prop = t == Tab.Direction ? normalProp : t == Tab.Length ? lengthProp : alphaProp;
+                if (!targetMat.HasProperty(prop) || targetMat.GetTexture(prop) != null) continue;
+                SaveMap(t, true);
+                any |= targetMat.GetTexture(prop) != null;
+            }
+            return any;
         }
 
         void RevertResolve()
@@ -1476,15 +1583,17 @@ namespace FurGroomingTool
 
         void SaveCurrent() { SaveMap(tab); }
 
-        void SaveMap(Tab which)
+        // fresh: the map is being made for an empty slot, not saved by hand. A file already at the
+        // path then belongs to something else - another avatar's groom, most likely - and is kept.
+        void SaveMap(Tab which, bool fresh = false)
         {
             string b = string.IsNullOrEmpty(baseName) ? "Fur" : baseName;
-            if (which == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), b + "_Normal", true, normalProp);
-            else if (which == Tab.Length) SaveTexture(BuildMaskTex(exportRes, CompositeLen(), false), b + "_Length", false, lengthProp);
-            else if (which == Tab.Alpha) SaveTexture(BuildMaskTex(exportRes, CompositeAlpha(), true), b + "_Alpha", false, alphaProp);
+            if (which == Tab.Direction) SaveTexture(BuildNormalTex(exportRes), b + "_Normal", true, normalProp, fresh);
+            else if (which == Tab.Length) SaveTexture(BuildMaskTex(exportRes, CompositeLen(), false), b + "_Length", false, lengthProp, fresh);
+            else if (which == Tab.Alpha) SaveTexture(BuildMaskTex(exportRes, CompositeAlpha(), true), b + "_Alpha", false, alphaProp, fresh);
         }
 
-        void SaveTexture(Texture2D tex, string name, bool normal, string prop)
+        void SaveTexture(Texture2D tex, string name, bool normal, string prop, bool fresh = false)
         {
             string path;
             if (!string.IsNullOrEmpty(outputFolder) && IsInsideAssets(outputFolder))
@@ -1492,6 +1601,7 @@ namespace FurGroomingTool
                 string folder = outputFolder.Replace('\\', '/').TrimEnd('/');
                 if (!System.IO.Directory.Exists(folder)) System.IO.Directory.CreateDirectory(folder);
                 path = folder + "/" + name + ".png"; // overwrites if it already exists
+                if (fresh && File.Exists(path)) path = AssetDatabase.GenerateUniqueAssetPath(path);
             }
             else
             {
@@ -1997,6 +2107,105 @@ namespace FurGroomingTool
             wa = 1f - wb - wc;
             const float e = -0.0005f;
             return wa >= e && wb >= e && wc >= e;
+        }
+
+        // =========================================================== self-check
+
+        // A flat body with an outfit over its left half, run through the Collision tab's own
+        // Resolve: once on a fur material with nothing in its slots, once on one that brings a
+        // length mask. Everything is built here and removed again, so it needs no avatar.
+        [MenuItem("Tools/Fur Grooming Tool/Self-check: collision tab")]
+        public static void SelfCheck()
+        {
+            const string dir = "Assets/__FurCollisionSelfCheck";
+            const string nrm = "_BumpMap", len = "_MetallicGlossMap", alpha = "_OcclusionMap";
+            var made = new System.Collections.Generic.List<Object>();
+            int fails = 0;
+            System.Action<bool, string> check = (ok, what) =>
+            {
+                if (ok) return;
+                fails++;
+                Debug.LogError("[Fur] collision tab self-check: " + what);
+            };
+
+            try
+            {
+                Directory.CreateDirectory(dir);
+                Renderer body = FurOutfitMaterialsWindow.Sheet("Body", 0f, 1f, 0f, made).GetComponent<Renderer>();
+                Renderer piece = FurOutfitMaterialsWindow.Sheet("Piece", 0f, 0.5f, -0.005f, made).GetComponent<Renderer>();
+                System.Func<string, FurGroomingWindow> open = name =>
+                {
+                    var w = CreateInstance<FurGroomingWindow>();
+                    made.Add(w);
+                    w.normalProp = nrm; w.lengthProp = len; w.alphaProp = alpha;
+                    w.targetRenderer = body; w.clothing.Add(piece);
+                    w.outputFolder = dir; w.baseName = name; w.exportRes = 512;
+                    return w;
+                };
+                int under = (MN / 2) * MN + MN / 4, clear = (MN / 2) * MN + MN * 3 / 4;   // canvas texels
+
+                // --- nothing in the material: every map is made and assigned
+                var bare = new Material(Shader.Find("Standard"));
+                made.Add(bare);
+                body.sharedMaterial = bare;
+                string taken = FurMapCodec.WritePng(FurMapCodec.Blank(8, FurMapCodec.White), dir + "/A_Normal.png", false, false);
+                byte[] takenBytes = File.ReadAllBytes(taken);
+
+                FurGroomingWindow a = open("A");
+                a.RunResolve();
+                check(a.targetMat == bare, "the fur material should be picked off the fur mesh");
+                string nPath = AssetDatabase.GetAssetPath(bare.GetTexture(nrm));
+                string lPath = AssetDatabase.GetAssetPath(bare.GetTexture(len));
+                string aPath = AssetDatabase.GetAssetPath(bare.GetTexture(alpha));
+                check(nPath != "" && lPath != "" && aPath != "", "every empty slot should get a map: '" + nPath + "' '" + lPath + "' '" + aPath + "'");
+                check(nPath != taken && System.Linq.Enumerable.SequenceEqual(takenBytes, File.ReadAllBytes(taken)),
+                      "a file that was already at the output path was written over");
+                if (lPath != "")
+                {
+                    float[] h = FurOutfitMaterialsWindow.Halves(lPath);
+                    check(h[0] < 0.5f && h[1] > 0.99f, "length should be trimmed under the outfit only, got " + h[0] + " / " + h[1]);
+                }
+                if (aPath != "")
+                    check(FurOutfitMaterialsWindow.Halves(aPath)[1] > 0.99f, "alpha should start white where the outfit is not");
+
+                a.RevertResolve();
+                check(!a.lenStack.Unpainted() && a.CompositeLen()[under] > 0.99f, "revert should go back to the seeded mask, untrimmed");
+                a.RunResolve();
+                check(a.CompositeLen()[under] < 0.5f, "a resolve after a revert should trim again");
+                check(AssetDatabase.GetAssetPath(bare.GetTexture(len)) == lPath && !File.Exists(dir + "/A_Length 1.png"),
+                      "a second resolve should not write a filled slot again");
+
+                // --- a mask the material already has is the groom, and stays where it is
+                string grey = FurMapCodec.WritePng(FurMapCodec.Blank(64, new Color32(128, 128, 128, 255)), dir + "/Grey.png", false, false);
+                var own = new Material(Shader.Find("Standard"));
+                made.Add(own);
+                own.SetTexture(len, AssetDatabase.LoadAssetAtPath<Texture2D>(grey));
+                FurGroomingWindow b = open("B");
+                b.targetMat = own;
+                b.RunResolve();
+                float[] c = b.CompositeLen();
+                check(Mathf.Abs(c[clear] - 128f / 255f) < 0.01f && c[under] < c[clear] - 0.05f,
+                      "an unpainted mask should start from the material's own, got " + c[under] + " / " + c[clear]);
+                check(AssetDatabase.GetAssetPath(own.GetTexture(len)) == grey, "a filled slot should be left alone");
+                check(own.GetTexture(nrm) != null, "the slots that were empty should still be filled");
+
+                // --- default values: settings go back, the groom and the wiring stay
+                a.brushSize = 5; a.maxAngle = 20f; a.occl.furLengthMm = 99f; a.zoom = 4f;
+                a.ResetValues();
+                check(a.brushSize == 60 && a.maxAngle == 70f && a.occl.furLengthMm == 30f && a.zoom == 1f &&
+                      a.lengthProp == "_FurLengthMask", "default values did not put the settings back");
+                check(a.targetMat == bare && a.targetRenderer == body && a.clothing.Count == 1 && a.outputFolder == dir &&
+                      a.baseName == "A" && !a.lenStack.Unpainted(), "default values should keep the groom and the wiring");
+            }
+            finally
+            {
+                foreach (Object o in made) if (o != null) DestroyImmediate(o);
+                AssetDatabase.DeleteAsset(dir);
+            }
+
+            if (fails == 0) Debug.Log("[Fur] collision tab self-check: passed.");
+            else Debug.LogError("[Fur] collision tab self-check: " + fails + " failed.");
+            if (Application.isBatchMode) EditorApplication.Exit(fails == 0 ? 0 : 1);
         }
     }
 }

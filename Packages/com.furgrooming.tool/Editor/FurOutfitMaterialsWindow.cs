@@ -255,7 +255,7 @@ namespace FurGroomingTool
         }
 
         // A flat sheet from u0 to u1 of a 1m square, whose UVs match its position.
-        static GameObject Sheet(string name, float u0, float u1, float z, List<Object> made)
+        internal static GameObject Sheet(string name, float u0, float u1, float z, List<Object> made)
         {
             var m = new Mesh
             {
@@ -272,7 +272,7 @@ namespace FurGroomingTool
         }
 
         // Mean red of the left and right halves, staying clear of the seam between them.
-        static float[] Halves(string path)
+        internal static float[] Halves(string path)
         {
             var t = new Texture2D(2, 2);
             t.LoadImage(File.ReadAllBytes(path));

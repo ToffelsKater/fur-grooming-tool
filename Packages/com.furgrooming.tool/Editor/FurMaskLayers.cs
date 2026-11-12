@@ -208,6 +208,14 @@ namespace FurGroomingTool
             return L;
         }
 
+        // Nothing painted by hand anywhere: no layer but the resolver's own covers a single texel.
+        public bool Unpainted()
+        {
+            foreach (MaskLayer L in layers)
+                if (!L.isResolver && L.cover != null && Array.Exists(L.cover, c => c != 0)) return false;
+            return true;
+        }
+
         // ---- compositing
 
         public float[] Composite()

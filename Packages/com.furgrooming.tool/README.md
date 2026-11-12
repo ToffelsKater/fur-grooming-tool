@@ -38,6 +38,7 @@ Open the tool from the menu: **Tools ▸ Fur Grooming Tool**.
 5. **Symmetry** — paint one side, choose the **Mirror** direction + axis, then **Apply mirror** to copy it across. Direction vectors are flipped correctly across the axis; every layer is mirrored.
 6. **Save … map** (green button) writes a PNG into `/Assets` with the correct import settings (Normal map / linear grayscale, sRGB off) and assigns it to the material property if one is set.
 7. **Save groom / Load groom** (Direction tab) stores the direction field and both layer stacks in a groom file (`.bytes`) so you can resume later. Groom files written by 1.0.x still load, into a single base layer per mask.
+8. **Default values** (top right, beside the tabs) puts every setting on every tab back to its default, after asking. It keeps the groom, the meshes, the material, the clothing list, and the output folder and file name. Settings are not on the undo stack, so this cannot be undone.
 
 ## Paint layers
 
@@ -107,6 +108,17 @@ instantly against your untouched groom, the slider fades it, and **Drop layer** 
 Resolve again rewrites that one layer and nothing else. Your hand-painted length and alpha work is
 never overwritten. The Direction field is still edited in place, so `Ctrl+Z` and **Revert** remain
 the way back for that.
+
+Nothing has to be painted or assigned first. **Fur material** is the material the maps go on; left
+empty, Resolve picks the fur mesh's own. A Length or Alpha mask you have not painted starts from the
+one on that material, or from white (fur everywhere, full length) where the material has none - the
+same thing the shader draws. That starting mask stays on the bottom layer, and **Revert** goes back
+to it rather than to an empty canvas. The Direction field is not read from the material: unpainted,
+it starts straight out.
+
+A map slot the material has **nothing in** is then written and assigned by Resolve itself, into the
+output folder under the file base name. A file already at that path is kept, and the new one gets a
+numbered name. A slot that already holds a map is only ever written by the **Save** buttons.
 
 ### How it works
 

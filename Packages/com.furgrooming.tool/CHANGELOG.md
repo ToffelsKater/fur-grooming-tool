@@ -2,6 +2,22 @@
 
 All notable changes to this package are documented here.
 
+## [1.4.0] - 2026-11-12
+### Added
+- **Default values** button beside the tabs of the paint window. It puts every setting on every tab
+  back to its default, after asking. The groom, the meshes, the material, the clothing list, and the
+  output folder and file name are kept.
+- **Fur material** field on the Collision tab. It is the same field as Target material on the paint
+  tabs, and Resolve fills it from the fur mesh when it is empty.
+- A `Tools > Fur Grooming Tool > Self-check: collision tab` menu item.
+
+### Fixed
+- **The Collision tab works on a fur material that has no maps.** Resolve read an unpainted Length
+  mask as "no fur" and did nothing, and the saved maps were only assigned when Target material had
+  been set on a paint tab. An unpainted Length or Alpha mask now starts from the one on the fur
+  material, or from white where the material has none, and a map slot the material has nothing in is
+  written and assigned by Resolve. A file already at the output path is not written over.
+
 ## [1.3.0] - 2026-11-01
 ### Added
 - **Fur Outfit Materials** panel (`Tools > Fur Outfit Materials`). Set a body mesh, a base fur material
