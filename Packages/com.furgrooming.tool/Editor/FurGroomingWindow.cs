@@ -104,6 +104,7 @@ namespace FurGroomingTool
         readonly System.Collections.Generic.List<Vector3> sceneHits = new System.Collections.Generic.List<Vector3>();
         readonly System.Collections.Generic.List<Vector3> sceneNormals = new System.Collections.Generic.List<Vector3>();
         Vector2? meshPointUv;   // 'Point on mesh': canvas UV under the Scene view mouse, null when it is off the mesh
+        readonly System.Collections.Generic.List<Vector3> brushOutline = new System.Collections.Generic.List<Vector3>();   // brush reach on the mesh, world-space line pairs
         [SerializeField] bool foldBrush = true, foldTool = true, foldLayers = true, foldSym = false, foldExport = false, foldScene = false;
         Vector2 settingsScroll;
 
@@ -323,11 +324,16 @@ namespace FurGroomingTool
             {
                 EditorGUI.indentLevel++;
                 EditorGUILayout.BeginHorizontal();
-                showOnMesh = EditorGUILayout.ToggleLeft("Show on mesh", showOnMesh, GUILayout.Width(120));
+                EditorGUI.BeginChangeCheck();
+                showOnMesh = EditorGUILayout.ToggleLeft(new GUIContent("Show on mesh",
+                    "Hover the canvas to see that spot on the mesh: a marker at the brush center and a ring " +
+                    "around everything the brush reaches."), showOnMesh, GUILayout.Width(120));
                 pointOnMesh = EditorGUILayout.ToggleLeft(new GUIContent("Point on mesh",
-                    "Hover the mesh in the Scene view to see that spot as the brush ring on the canvas. " +
-                    "The mesh is read in the pose it had when it was assigned; press Refresh mesh after posing it."),
+                    "Hover the mesh in the Scene view to see that spot as the brush ring on the canvas, and the " +
+                    "brush's reach as a ring on the mesh. The mesh is read in the pose it had when it was assigned; " +
+                    "press Refresh mesh after posing it."),
                     pointOnMesh, GUILayout.Width(120));
+                if (EditorGUI.EndChangeCheck()) { brushOutline.Clear(); SceneView.RepaintAll(); }   // no ring left behind
                 if (ColorButton("Refresh mesh", colGray, GUILayout.Width(100))) CacheMesh();
                 EditorGUILayout.EndHorizontal();
                 EditorGUILayout.LabelField("Mesh is set in 'Canvas & brush'.", EditorStyles.miniLabel);
@@ -1093,7 +1099,7 @@ namespace FurGroomingTool
             if (showOnMesh)
             {
                 if (inside && (e.type == EventType.MouseMove || e.type == EventType.MouseDrag || e.type == EventType.MouseDown)) UpdateSceneHit(uv);
-                else if (e.type == EventType.MouseLeaveWindow && sceneHits.Count > 0) { sceneHits.Clear(); SceneView.RepaintAll(); }
+                else if (e.type == EventType.MouseLeaveWindow && sceneHits.Count > 0) { sceneHits.Clear(); brushOutline.Clear(); SceneView.RepaintAll(); }
             }
 
             if (e.type == EventType.MouseDown && (e.button == 0 || e.button == 1) && inside)
@@ -1960,7 +1966,7 @@ namespace FurGroomingTool
         void CacheMesh()
         {
             meshVerts = null; meshUVs = null; meshNorms = null; meshTris = null; meshSkinned = false;
-            sceneHits.Clear(); sceneNormals.Clear();
+            sceneHits.Clear(); sceneNormals.Clear(); brushOutline.Clear();
             SceneView.RepaintAll();
             Mesh source = FindUvMesh();
             if (!HasUvChannel(source, uvChannel)) uvChannel = 0;
@@ -2038,7 +2044,7 @@ namespace FurGroomingTool
         // UVs yield several hits) and store world positions for the Scene view marker.
         void UpdateSceneHit(Vector2 toolUv)
         {
-            sceneHits.Clear(); sceneNormals.Clear();
+            sceneHits.Clear(); sceneNormals.Clear(); brushOutline.Clear();
             if (showOnMesh && targetRenderer != null && meshVerts != null && meshUVs != null && meshUVs.Length > 0 && meshUVs.Length == meshVerts.Length)
             {
                 Vector2 q = new Vector2(toolUv.x, 1f - toolUv.y); // tool y is top-down; mesh V is bottom-up
@@ -2061,6 +2067,7 @@ namespace FurGroomingTool
                         if (sceneHits.Count >= 16) break;
                     }
                 }
+                BuildBrushOutline(toolUv);
             }
             FollowCamera();
             SceneView.RepaintAll();
@@ -2119,13 +2126,93 @@ namespace FurGroomingTool
                 if (pointOnMesh && MeshUvUnderRay(HandleUtility.GUIPointToWorldRay(e.mousePosition), out Vector2 hit)) uv = hit;
             }
             else if (e.type != EventType.MouseLeaveWindow) return;
-            if (uv != meshPointUv) { meshPointUv = uv; Repaint(); }
+            if (uv == meshPointUv) return;
+            meshPointUv = uv;
+            if (uv.HasValue) BuildBrushOutline(uv.Value); else brushOutline.Clear();
+            Repaint(); SceneView.RepaintAll();
+        }
+
+        // The brush's reach on the mesh: the canvas brush circle carried through every triangle its
+        // edge crosses, so it bends with UV stretching, shows on every mirrored copy and stops at
+        // seams, where the paint stops too.
+        // ponytail: 96 samples, each joined to its nearest neighbour one step back. A step that jumps
+        // between islands packed side by side is dropped; clip the circle per triangle if gaps show.
+        void BuildBrushOutline(Vector2 toolUv)
+        {
+            brushOutline.Clear();
+            if (targetRenderer == null || meshVerts == null || meshTris == null || meshUVs == null || meshUVs.Length != meshVerts.Length) return;
+            Vector2 c = new Vector2(toolUv.x, 1f - toolUv.y);   // mesh V is bottom-up
+            float rad = brushSize / REF, rad2 = rad * rad;
+            // Triangles the circle's edge can cross, with their UV boxes. Plain float compares first:
+            // nearly every triangle is nowhere near, and Vector2 maths costs ~10 ms a pass on a body.
+            var rim = new System.Collections.Generic.List<int>();
+            var box = new System.Collections.Generic.List<Vector4>();
+            float x0 = c.x - rad, x1 = c.x + rad, y0 = c.y - rad, y1 = c.y + rad;
+            for (int i = 0; i < meshTris.Length; i += 3)
+            {
+                Vector2 a = meshUVs[meshTris[i]], b = meshUVs[meshTris[i + 1]], d = meshUVs[meshTris[i + 2]];
+                if ((a.x < x0 && b.x < x0 && d.x < x0) || (a.x > x1 && b.x > x1 && d.x > x1) ||
+                    (a.y < y0 && b.y < y0 && d.y < y0) || (a.y > y1 && b.y > y1 && d.y > y1)) continue;   // nowhere near
+                if ((a - c).sqrMagnitude < rad2 && (b - c).sqrMagnitude < rad2 && (d - c).sqrMagnitude < rad2) continue;   // wholly inside
+                Vector2 lo = Vector2.Min(a, Vector2.Min(b, d)), hi = Vector2.Max(a, Vector2.Max(b, d));
+                if ((Vector2.Max(lo, Vector2.Min(c, hi)) - c).sqrMagnitude > rad2) continue;   // its box misses the circle
+                rim.Add(i);
+                box.Add(new Vector4(lo.x, lo.y, hi.x, hi.y));
+            }
+            const int N = 96;
+            float stepUv = 2f * Mathf.PI * rad / N;
+            Matrix4x4 mtx = MeshToWorld();
+            var prev = new System.Collections.Generic.List<Vector4>();   // mesh-space point; w = how far one step goes there
+            var cur = new System.Collections.Generic.List<Vector4>();
+            for (int k = 0; k <= N; k++)
+            {
+                float th = k * (2f * Mathf.PI / N);
+                Vector2 s = c + new Vector2(Mathf.Cos(th), Mathf.Sin(th)) * rad;
+                cur.Clear();
+                for (int r = 0; r < rim.Count; r++)
+                {
+                    Vector4 bb = box[r];
+                    if (s.x < bb.x || s.x > bb.z || s.y < bb.y || s.y > bb.w) continue;
+                    int i = rim[r], ia = meshTris[i], ib = meshTris[i + 1], ic = meshTris[i + 2];
+                    if (!Bary(s, meshUVs[ia], meshUVs[ib], meshUVs[ic], out float wa, out float wb, out float wc)) continue;
+                    Vector2 u1 = meshUVs[ib] - meshUVs[ia], u2 = meshUVs[ic] - meshUVs[ia];   // Bary refused a flat one
+                    Vector3 A = meshVerts[ia], B = meshVerts[ib], C = meshVerts[ic];
+                    float scale = Mathf.Sqrt(Vector3.Cross(B - A, C - A).magnitude / Mathf.Abs(u1.x * u2.y - u1.y * u2.x));
+                    Vector3 p = A * wa + B * wb + C * wc;
+                    cur.Add(new Vector4(p.x, p.y, p.z, stepUv * scale));
+                }
+                foreach (Vector4 h in cur)
+                {
+                    float best = float.MaxValue;
+                    Vector4 near = h;
+                    foreach (Vector4 q in prev)
+                    {
+                        float dd = ((Vector3)q - (Vector3)h).sqrMagnitude;
+                        if (dd < best) { best = dd; near = q; }
+                    }
+                    float reach = 3f * Mathf.Max(h.w, near.w);
+                    if (best > reach * reach) continue;   // nothing one step back, or another island
+                    brushOutline.Add(mtx.MultiplyPoint3x4(near));
+                    brushOutline.Add(mtx.MultiplyPoint3x4(h));
+                }
+                var swap = prev; prev = cur; cur = swap;
+            }
+        }
+
+        void DrawBrushOutline()
+        {
+            if (brushOutline.Count == 0 || Event.current.type != EventType.Repaint) return;
+            Handles.color = Color.black;   // a dark rim under a light line, like the ring on the canvas
+            for (int i = 0; i < brushOutline.Count; i += 2) Handles.DrawLine(brushOutline[i], brushOutline[i + 1], 4f);
+            Handles.color = Color.white;
+            for (int i = 0; i < brushOutline.Count; i += 2) Handles.DrawLine(brushOutline[i], brushOutline[i + 1], 2f);
         }
 
         void OnSceneGUI(SceneView sv)
         {
             DrawResolverDebug();
             TrackScenePointer();
+            DrawBrushOutline();
             if (!showOnMesh || sceneHits.Count == 0) return;
             Vector3 cam = sv.camera != null ? sv.camera.transform.position : Vector3.zero;
             Handles.color = markerColor;
@@ -2290,6 +2377,23 @@ namespace FurGroomingTool
                 check(back.HasValue && (back.Value - new Vector2(0.6f, 0.7f)).sqrMagnitude < 1e-8f,
                       "point on mesh from the back should find the far quad at (0.6, 0.7), got " + back);
                 check(point(new Vector3(1.5f, 0.6f, -1f), Vector3.forward) == null, "point on mesh should miss beside the mesh");
+
+                // --- brush outline: centered on the UV border between the quads, which lie 1 apart on the
+                // mesh, so it must come out as two half circles, one per quad, never joined
+                pw.brushSize = 64;   // 0.125 in UV, 0.25 across a quad
+                pw.BuildBrushOutline(new Vector2(0.5f, 0.75f));
+                int nearN = 0, farN = 0;
+                bool round = true, joined = false;
+                for (int i = 0; i < pw.brushOutline.Count; i++)
+                {
+                    Vector3 lp = tt.InverseTransformPoint(pw.brushOutline[i]);
+                    bool far = lp.z > 0.5f;
+                    if (far) farN++; else nearN++;
+                    round &= Mathf.Abs(Vector2.Distance(lp, new Vector2(far ? 0f : 1f, 0.5f)) - 0.25f) < 2e-3f;
+                    if (i % 2 == 1) joined |= far != (tt.InverseTransformPoint(pw.brushOutline[i - 1]).z > 0.5f);
+                }
+                check(nearN > 40 && farN > 40 && round && !joined, "the brush outline should be a half circle of radius 0.25 " +
+                      "on each quad, never joined: " + nearN + " / " + farN + " points, round " + round + ", joined " + joined);
             }
             finally
             {

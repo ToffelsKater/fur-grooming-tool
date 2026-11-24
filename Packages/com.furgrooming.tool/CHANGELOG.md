@@ -2,6 +2,13 @@
 
 All notable changes to this package are documented here.
 
+## [1.6.0] - 2026-11-25
+### Added
+- **Brush ring on the mesh.** The Scene view shows how far the brush reaches, as a ring on the mesh:
+  with Show on mesh while you hover or paint on the canvas, and with Point on mesh while you hover
+  the mesh. It is the canvas brush circle carried onto the mesh through the UVs, so it bends where
+  they stretch, shows on every mirrored copy and stops at seams, the way the paint does.
+
 ## [1.5.0] - 2026-11-25
 ### Added
 - **Point on mesh**, under Scene view preview in the paint window. Hover the mesh in the Scene view
