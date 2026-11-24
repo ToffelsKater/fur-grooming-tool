@@ -2,6 +2,12 @@
 
 All notable changes to this package are documented here.
 
+## [1.5.0] - 2026-11-25
+### Added
+- **Point on mesh**, under Scene view preview in the paint window. Hover the mesh in the Scene view
+  and the brush ring shows that spot on the canvas. The mesh is read in the pose it had when it was
+  assigned, so press Refresh mesh after posing the avatar.
+
 ## [1.4.0] - 2026-11-12
 ### Added
 - **Default values** button beside the tabs of the paint window. It puts every setting on every tab

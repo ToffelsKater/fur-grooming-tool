@@ -54,6 +54,7 @@ namespace FurGroomingTool
         [SerializeField] int uvChannel = 0;
         [SerializeField] Texture2D uvBackground;
         [SerializeField] bool showOnMesh = false;
+        [SerializeField] bool pointOnMesh = false;
         [SerializeField] MarkerShape markerShape = MarkerShape.Sphere;
         [SerializeField] Color markerColor = new Color(1f, 0.7f, 0.2f, 1f);
         [SerializeField] float markerSize = 0.06f;
@@ -102,6 +103,7 @@ namespace FurGroomingTool
         Vector3[] meshVerts; Vector2[] meshUVs; Vector3[] meshNorms; int[] meshTris; bool meshSkinned;
         readonly System.Collections.Generic.List<Vector3> sceneHits = new System.Collections.Generic.List<Vector3>();
         readonly System.Collections.Generic.List<Vector3> sceneNormals = new System.Collections.Generic.List<Vector3>();
+        Vector2? meshPointUv;   // 'Point on mesh': canvas UV under the Scene view mouse, null when it is off the mesh
         [SerializeField] bool foldBrush = true, foldTool = true, foldLayers = true, foldSym = false, foldExport = false, foldScene = false;
         Vector2 settingsScroll;
 
@@ -235,7 +237,7 @@ namespace FurGroomingTool
             arrowColor = d.arrowColor; showArrows = d.showArrows;
             lenMode = d.lenMode; lenValue = d.lenValue;
             alphaMode = d.alphaMode; alphaThreshold = d.alphaThreshold; alphaAA = d.alphaAA;
-            showOnMesh = d.showOnMesh; markerShape = d.markerShape; markerColor = d.markerColor; markerSize = d.markerSize;
+            showOnMesh = d.showOnMesh; pointOnMesh = d.pointOnMesh; markerShape = d.markerShape; markerColor = d.markerColor; markerSize = d.markerSize;
             followCam = d.followCam; alignToNormal = d.alignToNormal; camDistance = d.camDistance; fov = d.fov;
             normalProp = d.normalProp; lengthProp = d.lengthProp; alphaProp = d.alphaProp;
             brushSize = d.brushSize; brushFlow = d.brushFlow; brushHardness = d.brushHardness; bgOpacity = d.bgOpacity;
@@ -322,6 +324,10 @@ namespace FurGroomingTool
                 EditorGUI.indentLevel++;
                 EditorGUILayout.BeginHorizontal();
                 showOnMesh = EditorGUILayout.ToggleLeft("Show on mesh", showOnMesh, GUILayout.Width(120));
+                pointOnMesh = EditorGUILayout.ToggleLeft(new GUIContent("Point on mesh",
+                    "Hover the mesh in the Scene view to see that spot as the brush ring on the canvas. " +
+                    "The mesh is read in the pose it had when it was assigned; press Refresh mesh after posing it."),
+                    pointOnMesh, GUILayout.Width(120));
                 if (ColorButton("Refresh mesh", colGray, GUILayout.Width(100))) CacheMesh();
                 EditorGUILayout.EndHorizontal();
                 EditorGUILayout.LabelField("Mesh is set in 'Canvas & brush'.", EditorStyles.miniLabel);
@@ -1037,9 +1043,12 @@ namespace FurGroomingTool
             Handles.DrawSolidDisc(V3(b), Vector3.forward, 4f);
         }
 
+        // The brush ring under the mouse, or, with 'Point on mesh', where the Scene view mouse is on
+        // the mesh. That one wins: while it is set the mouse is over the Scene view, and this window's
+        // last mouse position is stale.
         void DrawCursor(Rect r)
         {
-            Vector2 m = Event.current.mousePosition;
+            Vector2 m = meshPointUv.HasValue ? UvToRect(meshPointUv.Value, r) : Event.current.mousePosition;
             if (!r.Contains(m)) return;
             float rad = brushSize / REF * (r.width / ViewSize);
             Handles.color = Color.black; Handles.DrawWireDisc(V3(m), Vector3.forward, rad + 1f);
@@ -2033,8 +2042,7 @@ namespace FurGroomingTool
             if (showOnMesh && targetRenderer != null && meshVerts != null && meshUVs != null && meshUVs.Length > 0 && meshUVs.Length == meshVerts.Length)
             {
                 Vector2 q = new Vector2(toolUv.x, 1f - toolUv.y); // tool y is top-down; mesh V is bottom-up
-                Transform t = targetRenderer.transform;
-                Matrix4x4 mtx = meshSkinned ? Matrix4x4.TRS(t.position, t.rotation, Vector3.one) : targetRenderer.localToWorldMatrix;
+                Matrix4x4 mtx = MeshToWorld();
                 bool hasN = meshNorms != null && meshNorms.Length == meshVerts.Length;
                 for (int i = 0; i < meshTris.Length; i += 3)
                 {
@@ -2046,7 +2054,7 @@ namespace FurGroomingTool
                         if (hasN)
                         {
                             Vector3 ln = meshNorms[a] * wa + meshNorms[b] * wb + meshNorms[c] * wc;
-                            Vector3 wn = meshSkinned ? t.rotation * ln : targetRenderer.localToWorldMatrix.MultiplyVector(ln);
+                            Vector3 wn = mtx.MultiplyVector(ln);
                             sceneNormals.Add(wn.sqrMagnitude > 1e-9f ? wn.normalized : Vector3.up);
                         }
                         else sceneNormals.Add(Vector3.zero);
@@ -2058,9 +2066,66 @@ namespace FurGroomingTool
             SceneView.RepaintAll();
         }
 
+        // Where the cached mesh sits in the world; a skinned bake carries no scale. The Scene view
+        // marker and 'Point on mesh' both go through here, so the two directions always agree.
+        Matrix4x4 MeshToWorld()
+        {
+            Transform t = targetRenderer.transform;
+            return meshSkinned ? Matrix4x4.TRS(t.position, t.rotation, Vector3.one) : targetRenderer.localToWorldMatrix;
+        }
+
+        // The canvas UV of the nearest cached triangle a world ray hits (Moller-Trumbore), from
+        // either side. UVs outside 0..1 land off the canvas, as they do for the marker.
+        // ponytail: tests every triangle, about 4 ms per mouse move on a 70k-triangle body; add a BVH if hovering lags.
+        bool MeshUvUnderRay(Ray ray, out Vector2 toolUv)
+        {
+            toolUv = Vector2.zero;
+            if (targetRenderer == null || meshVerts == null || meshTris == null || meshUVs == null || meshUVs.Length != meshVerts.Length) return false;
+            Matrix4x4 inv = MeshToWorld().inverse;   // the ray goes into mesh space, not every vertex out of it
+            Vector3 o = inv.MultiplyPoint3x4(ray.origin), d = inv.MultiplyVector(ray.direction);
+            float best = float.MaxValue, bu = 0f, bv = 0f;
+            int hit = -1;
+            for (int i = 0; i < meshTris.Length; i += 3)
+            {
+                Vector3 a = meshVerts[meshTris[i]];
+                Vector3 e1 = meshVerts[meshTris[i + 1]] - a, e2 = meshVerts[meshTris[i + 2]] - a;
+                Vector3 p = Vector3.Cross(d, e2);
+                float det = Vector3.Dot(e1, p);
+                if (Mathf.Abs(det) < 1e-12f) continue;   // ray runs along the triangle
+                float f = 1f / det;
+                Vector3 s = o - a;
+                float u = Vector3.Dot(s, p) * f;
+                if (u < 0f || u > 1f) continue;
+                Vector3 q = Vector3.Cross(s, e1);
+                float v = Vector3.Dot(d, q) * f;
+                if (v < 0f || u + v > 1f) continue;
+                float t = Vector3.Dot(e2, q) * f;
+                if (t > 0f && t < best) { best = t; hit = i; bu = u; bv = v; }
+            }
+            if (hit < 0) return false;
+            Vector2 uv = meshUVs[meshTris[hit]] * (1f - bu - bv) + meshUVs[meshTris[hit + 1]] * bu + meshUVs[meshTris[hit + 2]] * bv;
+            toolUv = new Vector2(uv.x, 1f - uv.y);   // mesh V is bottom-up, the canvas top-down
+            return true;
+        }
+
+        // 'Point on mesh'. Events are only read, never used, so Scene view navigation is untouched,
+        // and the camera is never moved from here: Follow camera would chase the pointer.
+        void TrackScenePointer()
+        {
+            Event e = Event.current;
+            Vector2? uv = null;
+            if (e.type == EventType.MouseMove || e.type == EventType.MouseDrag)
+            {
+                if (pointOnMesh && MeshUvUnderRay(HandleUtility.GUIPointToWorldRay(e.mousePosition), out Vector2 hit)) uv = hit;
+            }
+            else if (e.type != EventType.MouseLeaveWindow) return;
+            if (uv != meshPointUv) { meshPointUv = uv; Repaint(); }
+        }
+
         void OnSceneGUI(SceneView sv)
         {
             DrawResolverDebug();
+            TrackScenePointer();
             if (!showOnMesh || sceneHits.Count == 0) return;
             Vector3 cam = sv.camera != null ? sv.camera.transform.position : Vector3.zero;
             Handles.color = markerColor;
@@ -2196,6 +2261,35 @@ namespace FurGroomingTool
                       a.lengthProp == "_FurLengthMask", "default values did not put the settings back");
                 check(a.targetMat == bare && a.targetRenderer == body && a.clothing.Count == 1 && a.outputFolder == dir &&
                       a.baseName == "A" && !a.lenStack.Unpainted(), "default values should keep the groom and the wiring");
+
+                // --- point on mesh: two stacked quads UV'd to different halves, on a moved, turned and
+                // squashed renderer, so the nearer quad has to win through the renderer's transform
+                var twoMesh = new Mesh
+                {
+                    vertices = new[] { new Vector3(0, 0, 0), new Vector3(0, 1, 0), new Vector3(1, 1, 0), new Vector3(1, 0, 0),
+                                       new Vector3(0, 0, 1), new Vector3(0, 1, 1), new Vector3(1, 1, 1), new Vector3(1, 0, 1) },
+                    uv = new[] { new Vector2(0, 0), new Vector2(0, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0),
+                                 new Vector2(0.5f, 0), new Vector2(0.5f, 0.5f), new Vector2(1, 0.5f), new Vector2(1, 0) },
+                    triangles = new[] { 0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7 }
+                };
+                var two = new GameObject("Two");
+                two.AddComponent<MeshFilter>().sharedMesh = twoMesh;
+                made.Add(twoMesh); made.Add(two);
+                Transform tt = two.transform;
+                tt.SetPositionAndRotation(new Vector3(3f, 1f, -2f), Quaternion.Euler(10f, 40f, 0f));
+                tt.localScale = new Vector3(2f, 3f, 0.5f);
+                FurGroomingWindow pw = open("P");
+                pw.targetRenderer = two.AddComponent<MeshRenderer>();
+                pw.CacheMesh();
+                System.Func<Vector3, Vector3, Vector2?> point = (at, along) =>
+                    pw.MeshUvUnderRay(new Ray(tt.TransformPoint(at), tt.TransformDirection(along)), out Vector2 uv) ? uv : (Vector2?)null;
+                Vector2? front = point(new Vector3(0.2f, 0.6f, -1f), Vector3.forward);
+                Vector2? back = point(new Vector3(0.2f, 0.6f, 2f), Vector3.back);
+                check(front.HasValue && (front.Value - new Vector2(0.1f, 0.7f)).sqrMagnitude < 1e-8f,
+                      "point on mesh from the front should find the near quad at (0.1, 0.7), got " + front);
+                check(back.HasValue && (back.Value - new Vector2(0.6f, 0.7f)).sqrMagnitude < 1e-8f,
+                      "point on mesh from the back should find the far quad at (0.6, 0.7), got " + back);
+                check(point(new Vector3(1.5f, 0.6f, -1f), Vector3.forward) == null, "point on mesh should miss beside the mesh");
             }
             finally
             {
