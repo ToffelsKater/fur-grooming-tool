@@ -2,6 +2,17 @@
 
 All notable changes to this package are documented here.
 
+## [1.7.0] - 2026-11-25
+### Added
+- **Paint on mesh**, under Scene view preview: paint the groom straight onto the mesh in the Scene
+  view, on the Direction, Length or Alpha tab. Left-drag paints, Ctrl+left-drag does what right-drag
+  does on the canvas, and Shift with it cuts a hole. The brush is a sphere around the point under the
+  mouse, as big as the canvas brush at the mesh's average texel density, so a stroke runs straight
+  across UV seams, a comb keeps its line from one UV island into the next, and a texel shared by
+  mirrored UVs is painted from the nearer side. Faces turned away from the brush, like the back of an
+  ear, are left alone. Unity's move, rotate and scale handles are put away while it is on; the Length
+  tab's Gradient stays on the canvas.
+
 ## [1.6.0] - 2026-11-25
 ### Added
 - **Brush ring on the mesh.** The Scene view shows how far the brush reaches, as a ring on the mesh:

@@ -31,6 +31,7 @@ Open the tool from the menu: **Tools ▸ Fur Grooming Tool**.
 2. (Optional) drag the avatar's liltoon **material** into **Target material** to auto-assign maps on save.
 3. Pick a tab and paint:
    - **Left-drag** paints. **Right-drag** marks black (or erases, on the bottom layer / with Shift). **Scroll** to zoom (cursor-anchored). **Middle-drag** to pan.
+   - **Paint on mesh** (under **Scene view preview**) paints straight onto the model in the Scene view instead: left-drag paints, Ctrl+left-drag does what right-drag does on the canvas. The brush is a sphere on the mesh, as big as the canvas brush at the mesh's average texel density, so strokes and combing run across UV seams. Faces turned away from the brush (the back of an ear) are left alone. Unity's move/rotate/scale handles are put away while it is on; press W, E or R to get them back.
    - **Direction** — drag to comb. `Pinch` converges a tuft to a point; `Direction` / `Strength` / `Erase` edit one channel.
    - **Length** — `Paint` (soft, builds gradients via flow + hardness), `Smudge` (melts edges smooth), `Gradient` (drag a line for a root→tip ramp). `Fill white` / `Fill black` fill the selected layer, `Smooth layer` blurs it.
    - **Alpha** — `Paint white` / `Paint black` hard brushes, `Fill white` / `Fill black`, `Threshold` + soft-edge toggle for crisp cutouts (paw pads, under clothing).

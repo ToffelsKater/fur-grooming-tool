@@ -55,6 +55,7 @@ namespace FurGroomingTool
         [SerializeField] Texture2D uvBackground;
         [SerializeField] bool showOnMesh = false;
         [SerializeField] bool pointOnMesh = false;
+        [SerializeField] bool paintOnMesh = false;
         [SerializeField] MarkerShape markerShape = MarkerShape.Sphere;
         [SerializeField] Color markerColor = new Color(1f, 0.7f, 0.2f, 1f);
         [SerializeField] float markerSize = 0.06f;
@@ -101,10 +102,20 @@ namespace FurGroomingTool
         bool gradActive;
         float canvasSize = REF;
         Vector3[] meshVerts; Vector2[] meshUVs; Vector3[] meshNorms; int[] meshTris; bool meshSkinned;
+        float meshUvScale;   // mesh units per UV unit, over the whole mesh: sqrt(surface area / UV area)
         readonly System.Collections.Generic.List<Vector3> sceneHits = new System.Collections.Generic.List<Vector3>();
         readonly System.Collections.Generic.List<Vector3> sceneNormals = new System.Collections.Generic.List<Vector3>();
         Vector2? meshPointUv;   // 'Point on mesh': canvas UV under the Scene view mouse, null when it is off the mesh
         readonly System.Collections.Generic.List<Vector3> brushOutline = new System.Collections.Generic.List<Vector3>();   // brush reach on the mesh, world-space line pairs
+        // ---- 'Paint on mesh'
+        MeshHit? meshCursor;              // under the Scene view mouse
+        bool meshStroking, meshUndoPushed;
+        Vector3[] meshWorld;              // the cached mesh in world space, for the stroke in progress
+        Vector3? lastMeshPoint;           // the last dab of the stroke; null at its start and after it left the mesh
+        Vector3 lastMeshMove;             // world direction of the last move, the comb direction for a brush held still
+        float[] dabNear; Vector2[] dabComb;   // per texel for one dab: distance as a fraction of the radius (1 = out of reach), comb direction
+        readonly System.Collections.Generic.List<int> dabTouched = new System.Collections.Generic.List<int>();
+        readonly System.Collections.Generic.List<int> nearTris = new System.Collections.Generic.List<int>();
         [SerializeField] bool foldBrush = true, foldTool = true, foldLayers = true, foldSym = false, foldExport = false, foldScene = false;
         Vector2 settingsScroll;
 
@@ -238,7 +249,7 @@ namespace FurGroomingTool
             arrowColor = d.arrowColor; showArrows = d.showArrows;
             lenMode = d.lenMode; lenValue = d.lenValue;
             alphaMode = d.alphaMode; alphaThreshold = d.alphaThreshold; alphaAA = d.alphaAA;
-            showOnMesh = d.showOnMesh; pointOnMesh = d.pointOnMesh; markerShape = d.markerShape; markerColor = d.markerColor; markerSize = d.markerSize;
+            showOnMesh = d.showOnMesh; pointOnMesh = d.pointOnMesh; paintOnMesh = d.paintOnMesh; markerShape = d.markerShape; markerColor = d.markerColor; markerSize = d.markerSize;
             followCam = d.followCam; alignToNormal = d.alignToNormal; camDistance = d.camDistance; fov = d.fov;
             normalProp = d.normalProp; lengthProp = d.lengthProp; alphaProp = d.alphaProp;
             brushSize = d.brushSize; brushFlow = d.brushFlow; brushHardness = d.brushHardness; bgOpacity = d.bgOpacity;
@@ -336,6 +347,15 @@ namespace FurGroomingTool
                 if (EditorGUI.EndChangeCheck()) { brushOutline.Clear(); SceneView.RepaintAll(); }   // no ring left behind
                 if (ColorButton("Refresh mesh", colGray, GUILayout.Width(100))) CacheMesh();
                 EditorGUILayout.EndHorizontal();
+                EditorGUI.BeginChangeCheck();
+                paintOnMesh = EditorGUILayout.ToggleLeft(new GUIContent("Paint on mesh",
+                    "Paint straight onto the mesh in the Scene view, on the tab you are on. Left-drag paints, " +
+                    "Ctrl+left-drag does what right-drag does on the canvas (with Shift it cuts a hole). Alt, right " +
+                    "and middle mouse still move the view; Unity's move, rotate and scale handles are put away " +
+                    "while it is on - press W, E or R to get them back."), paintOnMesh);
+                if (EditorGUI.EndChangeCheck()) { meshCursor = null; meshPointUv = null; brushOutline.Clear(); SceneView.RepaintAll(); }
+                if (paintOnMesh)
+                    EditorGUILayout.LabelField("Scene view: left-drag paints, Ctrl+left-drag erases. Strokes cross UV seams.", EditorStyles.miniLabel);
                 EditorGUILayout.LabelField("Mesh is set in 'Canvas & brush'.", EditorStyles.miniLabel);
                 if (showOnMesh)
                 {
@@ -1270,23 +1290,28 @@ namespace FurGroomingTool
                 {
                     float dist = Vector2.Distance(new Vector2(i + 0.5f, j + 0.5f), fc);
                     if (dist > r) continue;
-                    float w = Mathf.Clamp01(Falloff(dist, r, 0f) * brushFlow * 0.8f);
-                    int idx = j * res + i;
-                    float s = 0f, sc = 0f; int cnt = 0;
-                    for (int dy = -1; dy <= 1; dy++)
-                        for (int dx = -1; dx <= 1; dx++)
-                        {
-                            int x = Mathf.Clamp(i + dx, 0, res - 1), y = Mathf.Clamp(j + dy, 0, res - 1);
-                            s += buf[y * res + x];
-                            if (cover != null) sc += cover[y * res + x];
-                            cnt++;
-                        }
-                    buf[idx] = Mathf.Lerp(buf[idx], s / cnt, w);
-                    // Smear coverage with the value, so a smudge drags the painted region's
-                    // edge instead of only shuffling values inside it.
-                    if (cover != null)
-                        cover[idx] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(cover[idx], sc / cnt, w)), 0, 255);
+                    SmudgeTexel(buf, cover, res, i, j, Mathf.Clamp01(Falloff(dist, r, 0f) * brushFlow * 0.8f));
                 }
+        }
+
+        // One texel of a smudge, pulled toward the mean of its 3x3 neighbourhood by w.
+        void SmudgeTexel(float[] buf, byte[] cover, int res, int i, int j, float w)
+        {
+            int idx = j * res + i;
+            float s = 0f, sc = 0f; int cnt = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int x = Mathf.Clamp(i + dx, 0, res - 1), y = Mathf.Clamp(j + dy, 0, res - 1);
+                    s += buf[y * res + x];
+                    if (cover != null) sc += cover[y * res + x];
+                    cnt++;
+                }
+            buf[idx] = Mathf.Lerp(buf[idx], s / cnt, w);
+            // Smear coverage with the value, so a smudge drags the painted region's
+            // edge instead of only shuffling values inside it.
+            if (cover != null)
+                cover[idx] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(cover[idx], sc / cnt, w)), 0, 255);
         }
 
         void CommitGradient(Vector2 uvA, Vector2 uvB)
@@ -1977,6 +2002,18 @@ namespace FurGroomingTool
             // UVs belong to the source mesh; baking is only needed for posed positions/normals.
             meshVerts = m.vertices; meshUVs = ReadSelectedUvs(source); meshNorms = m.normals; meshTris = source.triangles;
             if (meshSkinned) DestroyImmediate(m);
+            // One texel density for the whole mesh sizes the brush on it. Taken per triangle, it made
+            // the brush jump to a speck wherever the UVs are stretched, as at the poles of a UV sphere.
+            float area = 0f, uvArea = 0f;
+            if (meshUVs.Length == meshVerts.Length)
+                for (int i = 0; i < meshTris.Length; i += 3)
+                {
+                    int a = meshTris[i], b = meshTris[i + 1], c = meshTris[i + 2];
+                    area += Vector3.Cross(meshVerts[b] - meshVerts[a], meshVerts[c] - meshVerts[a]).magnitude;
+                    Vector2 u1 = meshUVs[b] - meshUVs[a], u2 = meshUVs[c] - meshUVs[a];
+                    uvArea += Mathf.Abs(u1.x * u2.y - u1.y * u2.x);
+                }
+            meshUvScale = uvArea > 1e-12f ? Mathf.Sqrt(area / uvArea) : 0f;
         }
 
         // Render the mesh's UV islands into a wireframe texture and use it as the background.
@@ -2081,12 +2118,16 @@ namespace FurGroomingTool
             return meshSkinned ? Matrix4x4.TRS(t.position, t.rotation, Vector3.one) : targetRenderer.localToWorldMatrix;
         }
 
-        // The canvas UV of the nearest cached triangle a world ray hits (Moller-Trumbore), from
-        // either side. UVs outside 0..1 land off the canvas, as they do for the marker.
+        struct MeshHit { public Vector2 toolUv; public Vector3 point, normal; public float radius; }
+
+        // The nearest cached triangle a world ray hits (Moller-Trumbore), from either side: the
+        // world point, its canvas UV (outside 0..1 it lands off the canvas, as the marker does), the
+        // triangle's winding normal, and the brush radius in world units - the canvas brush carried
+        // over at the mesh's texel density, so a dab covers as many texels as on the canvas, on average.
         // ponytail: tests every triangle, about 4 ms per mouse move on a 70k-triangle body; add a BVH if hovering lags.
-        bool MeshUvUnderRay(Ray ray, out Vector2 toolUv)
+        bool RaycastMesh(Ray ray, out MeshHit hitOut)
         {
-            toolUv = Vector2.zero;
+            hitOut = default;
             if (targetRenderer == null || meshVerts == null || meshTris == null || meshUVs == null || meshUVs.Length != meshVerts.Length) return false;
             Matrix4x4 inv = MeshToWorld().inverse;   // the ray goes into mesh space, not every vertex out of it
             Vector3 o = inv.MultiplyPoint3x4(ray.origin), d = inv.MultiplyVector(ray.direction);
@@ -2110,8 +2151,14 @@ namespace FurGroomingTool
                 if (t > 0f && t < best) { best = t; hit = i; bu = u; bv = v; }
             }
             if (hit < 0) return false;
-            Vector2 uv = meshUVs[meshTris[hit]] * (1f - bu - bv) + meshUVs[meshTris[hit + 1]] * bu + meshUVs[meshTris[hit + 2]] * bv;
-            toolUv = new Vector2(uv.x, 1f - uv.y);   // mesh V is bottom-up, the canvas top-down
+            int ia = meshTris[hit], ib = meshTris[hit + 1], ic = meshTris[hit + 2];
+            Vector2 uv = meshUVs[ia] * (1f - bu - bv) + meshUVs[ib] * bu + meshUVs[ic] * bv;
+            Matrix4x4 mtx = MeshToWorld();
+            Vector3 A = mtx.MultiplyPoint3x4(meshVerts[ia]), B = mtx.MultiplyPoint3x4(meshVerts[ib]), C = mtx.MultiplyPoint3x4(meshVerts[ic]);
+            hitOut.toolUv = new Vector2(uv.x, 1f - uv.y);   // mesh V is bottom-up, the canvas top-down
+            hitOut.point = A * (1f - bu - bv) + B * bu + C * bv;
+            hitOut.normal = Vector3.Cross(B - A, C - A).normalized;
+            hitOut.radius = brushSize / REF * meshUvScale * Mathf.Pow(Mathf.Abs(mtx.determinant), 1f / 3f);   // the matrix's scale
             return true;
         }
 
@@ -2123,7 +2170,7 @@ namespace FurGroomingTool
             Vector2? uv = null;
             if (e.type == EventType.MouseMove || e.type == EventType.MouseDrag)
             {
-                if (pointOnMesh && MeshUvUnderRay(HandleUtility.GUIPointToWorldRay(e.mousePosition), out Vector2 hit)) uv = hit;
+                if (pointOnMesh && RaycastMesh(HandleUtility.GUIPointToWorldRay(e.mousePosition), out MeshHit hit)) uv = hit.toolUv;
             }
             else if (e.type != EventType.MouseLeaveWindow) return;
             if (uv == meshPointUv) return;
@@ -2208,10 +2255,242 @@ namespace FurGroomingTool
             for (int i = 0; i < brushOutline.Count; i += 2) Handles.DrawLine(brushOutline[i], brushOutline[i + 1], 2f);
         }
 
+        // =========================================================== paint on mesh
+        // The brush on the mesh is a sphere around the point under the mouse, its radius the canvas
+        // brush carried over at the texel density there. Every texel whose surface point is inside
+        // the sphere is painted, whichever UV island it sits on, so a stroke runs straight across
+        // seams and a comb keeps its line from one island into the next. This is the CPU form of
+        // VRC Texture Painter's UV-space brush: the triangles near the brush are rasterized into the
+        // canvas buffers, and each texel is weighed by its distance on the mesh.
+
+        static readonly int PaintHash = "FurGroomingPaintOnMesh".GetHashCode();
+
+        // Fly mode, Alt orbit or a middle-mouse pan is under way. viewToolActive alone is also true
+        // whenever the View tool is merely selected, which must not count.
+        static bool Navigating => Tools.viewToolActive && Tools.current != Tool.View;
+
+        void PaintOnMeshGUI(SceneView sv)
+        {
+            Event e = Event.current;
+            int id = GUIUtility.GetControlID(PaintHash, FocusType.Passive);
+            switch (e.GetTypeForControl(id))
+            {
+                case EventType.Layout:
+                    if (!Navigating && Tools.current != Tool.None) Tools.current = Tool.None;   // the left button is the brush's
+                    HandleUtility.AddDefaultControl(id);   // so a click paints instead of selecting
+                    break;
+                case EventType.MouseMove:
+                    AimMeshBrush(e.mousePosition, sv);
+                    break;
+                case EventType.MouseDown:
+                    if (e.button != 0 || e.alt || GUIUtility.hotControl != 0) break;
+                    GUIUtility.hotControl = id;
+                    AimMeshBrush(e.mousePosition, sv);
+                    BeginMeshStroke(sv, e);
+                    e.Use();
+                    break;
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl != id) break;
+                    AimMeshBrush(e.mousePosition, sv);
+                    if (meshStroking) PaintAtMeshCursor();
+                    e.Use();
+                    break;
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl != id) break;
+                    GUIUtility.hotControl = 0;
+                    meshStroking = false; meshWorld = null; lastMeshPoint = null;
+                    e.Use();
+                    break;
+                case EventType.MouseLeaveWindow:
+                    AimMeshBrush(null, sv);
+                    break;
+                case EventType.Repaint:
+                    DrawMeshBrush();
+                    break;
+            }
+        }
+
+        // Puts the brush under the Scene view mouse (null: the mouse left), and the canvas ring with it.
+        void AimMeshBrush(Vector2? gui, SceneView sv)
+        {
+            meshCursor = null;
+            if (gui.HasValue && RaycastMesh(HandleUtility.GUIPointToWorldRay(gui.Value), out MeshHit h)) meshCursor = h;
+            meshPointUv = meshCursor?.toolUv;
+            Repaint(); sv.Repaint();
+        }
+
+        void BeginMeshStroke(SceneView sv, Event e)
+        {
+            meshStroking = false;
+            bool erase = EditorGUI.actionKey;   // Ctrl, or Cmd on a Mac: what right-drag is on the canvas
+            string why = tab == Tab.Collision ? "Pick the Direction, Length or Alpha tab to paint"
+                : tab == Tab.Length && lenMode == LenMode.Gradient && !erase ? "The gradient is drawn on the canvas"
+                : ActiveLayerLocked() ? "This layer is generated - pick another layer to paint"
+                : null;
+            if (why != null) { sv.ShowNotification(new GUIContent(why), 1.5); return; }
+            paintErase = erase;
+            forceHoleErase = e.shift;
+            meshWorld = null; lastMeshPoint = null; meshUndoPushed = false;
+            meshStroking = true;
+            PaintAtMeshCursor();
+        }
+
+        void PaintAtMeshCursor()
+        {
+            if (!meshCursor.HasValue || meshCursor.Value.radius <= 0f) { lastMeshPoint = null; return; }   // off the mesh: the brush lifts
+            if (!meshUndoPushed) { PushUndoActive(); meshUndoPushed = true; }
+            MeshHit h = meshCursor.Value;
+            MeshStrokeTo(h.point, h.normal, h.radius);
+            if (tab != Tab.Direction) { ActiveStack().MarkDirty(); maskDirty = true; }
+            Repaint();
+        }
+
+        // Dabs from the last one to p, spaced as WalkField spaces canvas dabs and with both ends
+        // dabbed as it does, so a click on the mesh leaves what a click on the canvas leaves.
+        void MeshStrokeTo(Vector3 p, Vector3 n, float radius)
+        {
+            if (meshWorld == null)
+            {
+                Matrix4x4 mtx = MeshToWorld();
+                meshWorld = new Vector3[meshVerts.Length];
+                for (int i = 0; i < meshVerts.Length; i++) meshWorld[i] = mtx.MultiplyPoint3x4(meshVerts[i]);
+            }
+            Vector3 a = lastMeshPoint ?? p, move = p - a;
+            float len = move.magnitude;
+            if (len > radius * 0.01f) lastMeshMove = move / len;
+            int steps = Mathf.Max(1, Mathf.FloorToInt(len / (radius * 0.33f)));
+            // Only the triangles within reach of this stretch of the stroke, found with plain float compares.
+            Vector3 lo = Vector3.Min(a, p) - Vector3.one * radius, hi = Vector3.Max(a, p) + Vector3.one * radius;
+            nearTris.Clear();
+            for (int i = 0; i < meshTris.Length; i += 3)
+            {
+                Vector3 A = meshWorld[meshTris[i]], B = meshWorld[meshTris[i + 1]], C = meshWorld[meshTris[i + 2]];
+                if ((A.x < lo.x && B.x < lo.x && C.x < lo.x) || (A.x > hi.x && B.x > hi.x && C.x > hi.x) ||
+                    (A.y < lo.y && B.y < lo.y && C.y < lo.y) || (A.y > hi.y && B.y > hi.y && C.y > hi.y) ||
+                    (A.z < lo.z && B.z < lo.z && C.z < lo.z) || (A.z > hi.z && B.z > hi.z && C.z > hi.z)) continue;
+                nearTris.Add(i);
+            }
+            for (int k = 0; k <= steps; k++) MeshDab(Vector3.Lerp(a, p, (float)k / steps), n, radius);
+            lastMeshPoint = p;
+        }
+
+        // One dab of the sphere brush. A texel on several mirrored copies counts once, at the nearest;
+        // triangles facing away from n (the far side of an ear) are left alone.
+        // ponytail: about 5-7 ms a mouse move on a 70k-triangle body; it rasterizes each near triangle's
+        // whole UV box, so a mesh of a few huge triangles is slow - clip the box to the sphere then.
+        void MeshDab(Vector3 p, Vector3 n, float radius)
+        {
+            int res = tab == Tab.Direction ? FN : MN;
+            if (dabNear == null || dabNear.Length != res * res)
+            {
+                dabNear = new float[res * res];
+                dabComb = new Vector2[res * res];
+                for (int i = 0; i < dabNear.Length; i++) dabNear[i] = 1f;
+            }
+            bool pinch = tab == Tab.Direction && dirMode == DirMode.Pinch;
+            Vector3 lo = p - Vector3.one * radius, hi = p + Vector3.one * radius;
+            foreach (int t in nearTris)
+            {
+                int ia = meshTris[t], ib = meshTris[t + 1], ic = meshTris[t + 2];
+                Vector3 A = meshWorld[ia], B = meshWorld[ib], C = meshWorld[ic];
+                if ((A.x < lo.x && B.x < lo.x && C.x < lo.x) || (A.x > hi.x && B.x > hi.x && C.x > hi.x) ||
+                    (A.y < lo.y && B.y < lo.y && C.y < lo.y) || (A.y > hi.y && B.y > hi.y && C.y > hi.y) ||
+                    (A.z < lo.z && B.z < lo.z && C.z < lo.z) || (A.z > hi.z && B.z > hi.z && C.z > hi.z)) continue;
+                Vector3 e1 = B - A, e2 = C - A;
+                if (Vector3.Dot(Vector3.Cross(e1, e2), n) <= 0f) continue;
+                if ((FurClothVolume.ClosestOnTri(p, A, B, C) - p).sqrMagnitude >= radius * radius) continue;
+                Vector2 ta = new Vector2(meshUVs[ia].x * res, (1f - meshUVs[ia].y) * res);   // canvas texels, y down
+                Vector2 tb = new Vector2(meshUVs[ib].x * res, (1f - meshUVs[ib].y) * res);
+                Vector2 tc = new Vector2(meshUVs[ic].x * res, (1f - meshUVs[ic].y) * res);
+                // A move along the surface in canvas terms: split it into amounts of the triangle's two
+                // edges (their Gram system), then take the same amounts of the edges on the canvas.
+                float g11 = Vector3.Dot(e1, e1), g12 = Vector3.Dot(e1, e2), g22 = Vector3.Dot(e2, e2);
+                float det = g11 * g22 - g12 * g12;
+                if (det <= 1e-20f) continue;
+                Vector2 d1 = tb - ta, d2 = tc - ta;
+                Vector2 ToCanvas(Vector3 v)
+                {
+                    float b1 = Vector3.Dot(v, e1), b2 = Vector3.Dot(v, e2);
+                    return ((g22 * b1 - g12 * b2) * d1 + (g11 * b2 - g12 * b1) * d2) / det;
+                }
+                Vector2 comb = ToCanvas(lastMeshMove).normalized;
+                int x0 = Mathf.Max(0, Mathf.FloorToInt(Mathf.Min(ta.x, Mathf.Min(tb.x, tc.x)) - 0.5f));
+                int x1 = Mathf.Min(res - 1, Mathf.CeilToInt(Mathf.Max(ta.x, Mathf.Max(tb.x, tc.x)) - 0.5f));
+                int y0 = Mathf.Max(0, Mathf.FloorToInt(Mathf.Min(ta.y, Mathf.Min(tb.y, tc.y)) - 0.5f));
+                int y1 = Mathf.Min(res - 1, Mathf.CeilToInt(Mathf.Max(ta.y, Mathf.Max(tb.y, tc.y)) - 0.5f));
+                // Bary's sums in plain floats: Vector maths per texel was most of a dab's time.
+                float den = d1.x * d2.y - d2.x * d1.y;
+                if (Mathf.Abs(den) < 1e-12f) continue;
+                float inv = 1f / den, r2 = radius * radius;
+                for (int y = y0; y <= y1; y++)
+                    for (int x = x0; x <= x1; x++)
+                    {
+                        float qx = x + 0.5f - ta.x, qy = y + 0.5f - ta.y;
+                        float wb = (qx * d2.y - d2.x * qy) * inv, wc = (d1.x * qy - qx * d1.y) * inv;
+                        if (wb < -0.0005f || wc < -0.0005f || 1f - wb - wc < -0.0005f) continue;   // Bary's edge slack
+                        float sx = A.x + e1.x * wb + e2.x * wc - p.x, sy = A.y + e1.y * wb + e2.y * wc - p.y, sz = A.z + e1.z * wb + e2.z * wc - p.z;
+                        float dd = sx * sx + sy * sy + sz * sz;
+                        if (dd >= r2) continue;
+                        float d = Mathf.Sqrt(dd) / radius;
+                        int idx = y * res + x;
+                        if (d >= dabNear[idx]) continue;   // a nearer copy of this texel came first
+                        if (dabNear[idx] >= 1f) dabTouched.Add(idx);
+                        dabNear[idx] = d;
+                        Vector2 toCenter = pinch ? ToCanvas(new Vector3(-sx, -sy, -sz)) : Vector2.zero;
+                        dabComb[idx] = toCenter.sqrMagnitude > 1e-6f ? toCenter.normalized : comb;
+                    }
+            }
+            if (tab == Tab.Length && lenMode == LenMode.Smudge) dabTouched.Sort();   // row by row like a canvas dab: smudge reads what it just wrote
+            foreach (int idx in dabTouched) { MeshTexel(res, idx % res, idx / res, dabNear[idx], dabComb[idx]); dabNear[idx] = 1f; }
+            dabTouched.Clear();
+        }
+
+        // What one texel gets from a mesh dab: Stroke's choice of brush with the Dab* kernels' sums,
+        // d being the texel's distance from the brush center as a fraction of the radius and t the
+        // comb direction there. The self-check holds this to the canvas, mode by mode.
+        void MeshTexel(int res, int i, int j, float d, Vector2 t)
+        {
+            int idx = j * res + i;
+            if (tab == Tab.Direction)
+            {
+                float w = Mathf.Clamp01(Falloff(d, 1f, brushHardness) * brushFlow);
+                if (paintErase || dirMode == DirMode.Erase) { dirStr[idx] = Mathf.Lerp(dirStr[idx], 0f, w); return; }
+                if (dirMode != DirMode.Strength)
+                {
+                    Vector2 nd = Vector2.Lerp(dir[idx], t, w);
+                    if (nd.sqrMagnitude > 1e-8f) nd.Normalize();
+                    dir[idx] = nd;
+                }
+                if (dirMode != DirMode.Direction) dirStr[idx] = Mathf.Lerp(dirStr[idx], furStrength, w);
+                return;
+            }
+            MaskLayerStack st = ActiveStack();
+            MaskLayer L = st.Active;
+            float h = tab == Tab.Alpha ? 1f : brushHardness;
+            if (paintErase && EraseCutsHole(st)) { L.cover[idx] = MaskLayer.Lower(L.cover[idx], Mathf.Clamp01(Falloff(d, 1f, h) * brushFlow)); return; }
+            if (tab == Tab.Length && lenMode == LenMode.Smudge && !paintErase)
+            {
+                SmudgeTexel(L.value, L.cover, res, i, j, Mathf.Clamp01(Falloff(d, 1f, 0f) * brushFlow * 0.8f));
+                return;
+            }
+            float target = paintErase ? 0f : tab == Tab.Length ? lenValue : alphaMode == AlphaMode.White ? 1f : 0f;
+            float wp = Mathf.Clamp01(Falloff(d, 1f, h) * (tab == Tab.Alpha ? 1f : brushFlow));
+            L.value[idx] = Mathf.Lerp(L.value[idx], target, wp);
+            L.cover[idx] = MaskLayer.Raise(L.cover[idx], wp);
+        }
+
+        void DrawMeshBrush()
+        {
+            if (!meshCursor.HasValue) return;
+            MeshHit h = meshCursor.Value;   // the sphere's footprint, as a ring around the point
+            Handles.color = Color.black; Handles.DrawWireDisc(h.point, h.normal, h.radius, 4f);
+            Handles.color = Color.white; Handles.DrawWireDisc(h.point, h.normal, h.radius, 2f);
+        }
+
         void OnSceneGUI(SceneView sv)
         {
             DrawResolverDebug();
-            TrackScenePointer();
+            if (paintOnMesh) PaintOnMeshGUI(sv); else TrackScenePointer();
             DrawBrushOutline();
             if (!showOnMesh || sceneHits.Count == 0) return;
             Vector3 cam = sv.camera != null ? sv.camera.transform.position : Vector3.zero;
@@ -2369,7 +2648,7 @@ namespace FurGroomingTool
                 pw.targetRenderer = two.AddComponent<MeshRenderer>();
                 pw.CacheMesh();
                 System.Func<Vector3, Vector3, Vector2?> point = (at, along) =>
-                    pw.MeshUvUnderRay(new Ray(tt.TransformPoint(at), tt.TransformDirection(along)), out Vector2 uv) ? uv : (Vector2?)null;
+                    pw.RaycastMesh(new Ray(tt.TransformPoint(at), tt.TransformDirection(along)), out MeshHit mh) ? mh.toolUv : (Vector2?)null;
                 Vector2? front = point(new Vector3(0.2f, 0.6f, -1f), Vector3.forward);
                 Vector2? back = point(new Vector3(0.2f, 0.6f, 2f), Vector3.back);
                 check(front.HasValue && (front.Value - new Vector2(0.1f, 0.7f)).sqrMagnitude < 1e-8f,
@@ -2394,6 +2673,96 @@ namespace FurGroomingTool
                 }
                 check(nearN > 40 && farN > 40 && round && !joined, "the brush outline should be a half circle of radius 0.25 " +
                       "on each quad, never joined: " + nearN + " / " + farN + " points, round " + round + ", joined " + joined);
+
+                // --- paint on mesh: on the flat 1x1 sheet, where distances on the mesh and on the canvas
+                // agree, a click on the mesh must leave what a click on the canvas leaves, in every tab
+                // and mode (a click is two dabs either way)
+                FurGroomingWindow mw = open("M");
+                mw.targetRenderer = body;   // z = 0, UV = position
+                mw.CacheMesh();
+                mw.brushSize = 64;
+                bool aimed = mw.RaycastMesh(new Ray(new Vector3(0.3f, 0.6f, -1f), Vector3.forward), out MeshHit sheetHit);
+                check(aimed && Mathf.Abs(sheetHit.radius - 0.125f) < 1e-4f, "the mesh brush should reach 0.125 on the 1x1 sheet, got " + sheetHit.radius);
+                var modes = new (string name, System.Action set)[]
+                {
+                    ("comb", () => { mw.tab = Tab.Direction; mw.dirMode = DirMode.DirStrength; }),
+                    ("pinch", () => { mw.tab = Tab.Direction; mw.dirMode = DirMode.Pinch; }),
+                    ("direction erase", () => { mw.tab = Tab.Direction; mw.dirMode = DirMode.DirStrength; mw.paintErase = true; }),
+                    ("length", () => { mw.tab = Tab.Length; mw.lenMode = LenMode.Paint; }),
+                    ("smudge", () => { mw.tab = Tab.Length; mw.lenMode = LenMode.Smudge; }),
+                    ("length hole", () => { mw.tab = Tab.Length; mw.lenMode = LenMode.Paint; mw.paintErase = true; }),
+                    ("alpha", () => { mw.tab = Tab.Alpha; mw.alphaMode = AlphaMode.White; }),
+                };
+                foreach (var m in modes)
+                {
+                    Vector2[] cDir = null; float[] cStr = null, cVal = null; byte[] cCov = null;
+                    for (int run = 0; run < 2; run++)
+                    {
+                        mw.paintErase = false; mw.forceHoleErase = false;
+                        m.set();
+                        // the same uneven groom to start from on both runs, so smudge has something to move
+                        for (int i = 0; i < mw.dir.Length; i++) { mw.dir[i] = Vector2.up; mw.dirStr[i] = 0.5f; }
+                        MaskLayer ml = mw.ActiveStack().Active;
+                        for (int i = 0; i < ml.value.Length; i++) { ml.value[i] = (i % 7) / 7f; ml.cover[i] = 200; }
+                        if (run == 0)
+                        {
+                            mw.lastDir = Vector2.right;
+                            mw.Stroke(sheetHit.toolUv, sheetHit.toolUv);
+                            cDir = (Vector2[])mw.dir.Clone(); cStr = (float[])mw.dirStr.Clone();
+                            cVal = (float[])ml.value.Clone(); cCov = (byte[])ml.cover.Clone();
+                            continue;
+                        }
+                        mw.lastMeshPoint = null; mw.meshWorld = null; mw.lastMeshMove = Vector3.right;   // world +x is canvas +x here
+                        mw.MeshStrokeTo(sheetHit.point, sheetHit.normal, sheetHit.radius);
+                        float worst = 0f, moved = 0f;
+                        int worstCover = 0;   // a byte may round the other way on a float's last bit
+                        for (int i = 0; i < cDir.Length; i++)
+                        {
+                            worst = Mathf.Max(worst, Mathf.Max((mw.dir[i] - cDir[i]).magnitude, Mathf.Abs(mw.dirStr[i] - cStr[i])));
+                            moved += (cDir[i] - Vector2.up).magnitude + Mathf.Abs(cStr[i] - 0.5f);
+                        }
+                        for (int i = 0; i < cVal.Length; i++)
+                        {
+                            worst = Mathf.Max(worst, Mathf.Abs(ml.value[i] - cVal[i]));
+                            worstCover = Mathf.Max(worstCover, Mathf.Abs(ml.cover[i] - cCov[i]));
+                            moved += Mathf.Abs(cVal[i] - (i % 7) / 7f) + Mathf.Abs(cCov[i] - 200) / 255f;
+                        }
+                        check(moved > 1f && worst < 1e-3f && worstCover <= 1, "painting on the mesh should leave what the canvas " +
+                              "leaves (" + m.name + "): the canvas moved " + moved + ", the two differ by " + worst + " / " + worstCover);
+                    }
+                }
+
+                // --- paint on mesh across a seam: two quads side by side on the mesh, their UVs in opposite
+                // corners of the canvas; a dab on the edge they share must paint both, beside the seam only
+                var seamMesh = new Mesh
+                {
+                    vertices = new[] { new Vector3(0, 0, 0), new Vector3(0, 1, 0), new Vector3(1, 1, 0), new Vector3(1, 0, 0),
+                                       new Vector3(1, 0, 0), new Vector3(1, 1, 0), new Vector3(2, 1, 0), new Vector3(2, 0, 0) },
+                    uv = new[] { new Vector2(0, 0), new Vector2(0, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0),
+                                 new Vector2(0.5f, 0.5f), new Vector2(0.5f, 1), new Vector2(1, 1), new Vector2(1, 0.5f) },
+                    triangles = new[] { 0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7 }
+                };
+                var seam = new GameObject("Seam");
+                seam.AddComponent<MeshFilter>().sharedMesh = seamMesh;
+                made.Add(seamMesh); made.Add(seam);
+                mw.targetRenderer = seam.AddComponent<MeshRenderer>();
+                mw.CacheMesh();
+                mw.tab = Tab.Length; mw.lenMode = LenMode.Paint; mw.paintErase = false;
+                mw.lenStack.Active.Clear();
+                mw.RaycastMesh(new Ray(new Vector3(1f, 0.5f, -1f), Vector3.forward), out MeshHit seamHit);   // radius 0.25 here
+                mw.lastMeshPoint = null; mw.meshWorld = null;
+                mw.MeshStrokeTo(seamHit.point, seamHit.normal, seamHit.radius);
+                int lowerLeft = 0, upperRight = 0;
+                bool besideSeam = true;
+                for (int i = 0; i < MN * MN; i++)
+                {
+                    if (mw.lenStack.Active.cover[i] == 0) continue;
+                    float u = (i % MN + 0.5f) / MN, v = 1f - (i / MN + 0.5f) / MN;
+                    if (v < 0.5f) lowerLeft++; else upperRight++;
+                    besideSeam &= Mathf.Abs(u - 0.5f) < 0.13f;
+                }
+                check(lowerLeft > 100 && upperRight > 100 && besideSeam, "a dab on a seam should paint both islands along it: " +
+                      lowerLeft + " / " + upperRight + " texels, all beside the seam " + besideSeam);
             }
             finally
             {
