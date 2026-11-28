@@ -1,10 +1,11 @@
 // Per-outfit fur occlusion, driven from the outfit root.
 //
 // Drop this on the root of an outfit, press Bake, and the fur on the avatar underneath is
-// resolved against every mesh the outfit contains: a fresh set of fur maps is written, a
-// copy of the fur material is pointed at them, and - if a bool avatar parameter is named -
-// an animator layer is built that swaps that copy in while the parameter is on, so the
-// groomed-down fur follows the outfit instead of having to be swapped by hand.
+// resolved against every mesh the outfit contains, less the ones on its excluded list: a
+// fresh set of fur maps is written, a copy of the fur material is pointed at them, and - if
+// a bool avatar parameter is named - an animator layer is built that swaps that copy in
+// while the parameter is on, so the groomed-down fur follows the outfit instead of having
+// to be swapped by hand.
 //
 // The groom is read back out of the maps already assigned to the avatar's fur material, so
 // the paint window does not have to be open and no groom file has to live beside the scene.
@@ -12,6 +13,7 @@
 //
 // This component holds settings only. All the work is in FurOutfitBaker (editor side).
 
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace FurGroomingTool
@@ -21,8 +23,12 @@ namespace FurGroomingTool
     public class FurOutfitOccluder : MonoBehaviour
     {
         [Tooltip("The mesh the fur grows on - the avatar's body renderer. Every mesh under this " +
-                 "outfit root is treated as clothing to groom the fur away from.")]
+                 "outfit root that is not excluded is treated as clothing to groom the fur away from.")]
         public Renderer furRenderer;
+
+        [Tooltip("Meshes under this outfit root that should not trim the fur, such as a prop or a " +
+                 "strap that stands clear of the body.")]
+        public List<Renderer> excluded = new List<Renderer>();
 
         [Tooltip("Which material slot on the fur mesh carries the fur.")]
         public int materialIndex;

@@ -2,7 +2,7 @@
 //
 // One press does the whole round trip for one outfit:
 //
-//   1. every mesh under the outfit root is collected as clothing
+//   1. every mesh under the outfit root, less the excluded ones, is collected as clothing
 //   2. the groom is read back out of the maps on the avatar's fur material
 //   3. the occlusion resolver trims and leans the fur out of that clothing
 //   4. the three maps are written next to a copy of the fur material, which uses them. Each is
@@ -27,9 +27,14 @@ namespace FurGroomingTool
         const int FN = 256;   // direction field resolution, as in the paint window
         const int MN = 512;   // mask buffer resolution
 
-        public static List<Renderer> CollectOutfit(FurOutfitOccluder c)
+        // skipped counts the meshes under the root that the component's excluded list took out.
+        public static List<Renderer> CollectOutfit(FurOutfitOccluder c, out int skipped)
         {
-            return c == null ? new List<Renderer>() : CollectOutfit(c.gameObject, c.furRenderer);
+            skipped = 0;
+            if (c == null) return new List<Renderer>();
+            List<Renderer> list = CollectOutfit(c.gameObject, c.furRenderer);
+            skipped = list.RemoveAll(c.excluded.Contains);
+            return list;
         }
 
         public static List<Renderer> CollectOutfit(GameObject root, Renderer fur)
@@ -52,8 +57,11 @@ namespace FurGroomingTool
             Material src = c.ResolvedSource();
             if (src == null) return Fail(c, "The fur mesh has no material in slot " + c.materialIndex + ".");
 
-            List<Renderer> cloth = CollectOutfit(c);
-            if (cloth.Count == 0) return Fail(c, "No meshes found under " + c.name + ". Put this component on the outfit root.");
+            int skipped;
+            List<Renderer> cloth = CollectOutfit(c, out skipped);
+            if (cloth.Count == 0)
+                return Fail(c, skipped > 0 ? "Every mesh under " + c.name + " is excluded."
+                                           : "No meshes found under " + c.name + ". Put this component on the outfit root.");
 
             string folder = OutputFolder(c.outputFolder, src);
             if (folder == null) return Fail(c, "Output folder must be inside this project's Assets folder.");
@@ -73,9 +81,9 @@ namespace FurGroomingTool
             AssetDatabase.SaveAssets();
             EditorUtility.SetDirty(c);
 
-            c.lastReport = string.Format("{0} outfit mesh{1}.  {2}\n{3} -> {4}  {5}",
-                cloth.Count, cloth.Count == 1 ? "" : "es", rep.Summary(),
-                src.name, baked.name, toggle);
+            c.lastReport = string.Format("{0} outfit mesh{1}{2}.  {3}\n{4} -> {5}  {6}",
+                cloth.Count, cloth.Count == 1 ? "" : "es", skipped > 0 ? ", " + skipped + " excluded" : "",
+                rep.Summary(), src.name, baked.name, toggle);
             Debug.Log("[Fur] " + c.name + ": " + c.lastReport, baked);
             return true;
         }
@@ -406,8 +414,12 @@ namespace FurGroomingTool
                                         ". Check the property names, or pick the material that carries the fur.",
                                         MessageType.Warning);
 
-            int n = FurOutfitBaker.CollectOutfit(c).Count;
-            EditorGUILayout.LabelField("Outfit meshes", n + (n == 1 ? " mesh" : " meshes") + " under this object");
+            var ex = serializedObject.FindProperty("excluded");
+            EditorGUILayout.PropertyField(ex, new GUIContent("Excluded meshes", ex.tooltip), true);
+            int skipped;
+            int n = FurOutfitBaker.CollectOutfit(c, out skipped).Count;
+            EditorGUILayout.LabelField("Outfit meshes", n + (n == 1 ? " mesh" : " meshes") + " under this object" +
+                                                        (skipped > 0 ? ", " + skipped + " excluded" : ""));
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Swap", EditorStyles.boldLabel);

@@ -2,6 +2,12 @@
 
 All notable changes to this package are documented here.
 
+## [1.8.0] - 2026-11-28
+### Added
+- **Excluded meshes** on the Fur Outfit Materials panel and on the Fur Outfit Occluder component.
+  Meshes in this list are left out of the outfit's clothing, so a prop or a strap that stands clear
+  of the body no longer trims the fur under it. Each result says how many meshes were excluded.
+
 ## [1.7.0] - 2026-11-25
 ### Added
 - **Paint on mesh**, under Scene view preview: paint the groom straight onto the mesh in the Scene

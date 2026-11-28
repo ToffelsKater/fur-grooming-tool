@@ -175,7 +175,8 @@ which is what the **Fur Outfit Occluder** component does.
 Add it to the **root of an outfit** (`Add Component ▸ Fur Grooming ▸ Fur Outfit Occluder`), check
 the two fields it guessed, and press **Bake**. One press:
 
-1. collects **every mesh under that root** as clothing - nothing to list by hand,
+1. collects **every mesh under that root** as clothing, except any on its excluded list - nothing
+   to list by hand,
 2. reads the groom back out of the maps already on the avatar's fur material,
 3. runs the same occlusion resolver over it,
 4. writes a fresh normal / length / alpha set and a **copy of the fur material** that uses them,
@@ -199,6 +200,7 @@ the original, pixel for pixel.
 |-------|------------|
 | Fur mesh / Material slot | The avatar's body renderer and the slot that carries the fur. Guessed when the component is added, by looking for a material with the normal-map property. |
 | Source material | Override for that slot, if the fur material is not the one in it. |
+| Excluded meshes | Meshes under the root that should not trim the fur, such as a prop or a strap that stands clear of the body. The line under the list counts the meshes the bake will use. Optional. |
 | Avatar parameter | The bool the outfit toggle already listens to. The swap follows it. Optional. The bools the controller already has are offered in a dropdown, since a typo here fails silently. |
 | FX controller | Where the swap layer is built. Guessed from the Animator on the avatar root. |
 | Avatar root | What the animated paths are relative to - the object with the Animator. Guessed from the hierarchy. |
@@ -244,7 +246,9 @@ nothing to the avatar. Open it from `Tools ▸ Fur Outfit Materials`.
 1. Set the **Body mesh** and the **Base fur material**. If the material is empty when you pick the
    mesh, the first material on it with the normal-map property is filled in.
 2. Drag your **outfit roots** into the list. Every mesh under a root counts as that outfit's clothing,
-   and outfits that are toggled off are switched on for the measurement and back off afterwards.
+   and outfits that are toggled off are switched on for the measurement and back off afterwards. A
+   mesh that should not trim the fur, such as a prop or a strap that stands clear of the body, goes
+   in **Excluded meshes**.
 3. Pose the avatar and press **Bake outfit materials**.
 
 Each outfit gets a copy of the base material with its own length and normal maps, named

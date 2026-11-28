@@ -1,9 +1,9 @@
 // The panel for making every outfit's fur material at once.
 //
 // One base fur material, one body mesh, any number of outfit roots. Each root gets what
-// FurOutfitBaker does for one outfit: every mesh under it is collected as clothing, the groom
-// is read out of the base material's maps, and the resolver's result lands in a copy of the
-// material with that outfit's length and normal maps.
+// FurOutfitBaker does for one outfit: every mesh under it that is not on the excluded list is
+// collected as clothing, the groom is read out of the base material's maps, and the resolver's
+// result lands in a copy of the material with that outfit's length and normal maps.
 //
 // The panel stops at the materials and puts nothing on the avatar. Swapping them in belongs to
 // whatever already drives the outfit, such as a VRC-Fury material swap. A re-bake updates the
@@ -23,6 +23,7 @@ namespace FurGroomingTool
         [SerializeField] Renderer bodyMesh;
         [SerializeField] Material baseMaterial;
         [SerializeField] List<GameObject> outfits = new List<GameObject>();
+        [SerializeField] List<Renderer> excluded = new List<Renderer>();
 
         // Named as on FurOutfitOccluder, whose inspector drawers these share.
         [SerializeField] string normalProp = "_FurVectorTex";
@@ -61,6 +62,9 @@ namespace FurGroomingTool
             bool bodyChanged = EditorGUI.EndChangeCheck();
             EditorGUILayout.PropertyField(so.FindProperty("baseMaterial"), new GUIContent("Base fur material"));
             EditorGUILayout.PropertyField(so.FindProperty("outfits"), new GUIContent("Outfit roots"), true);
+            EditorGUILayout.PropertyField(so.FindProperty("excluded"), new GUIContent("Excluded meshes",
+                "Meshes under an outfit root that should not trim the fur, such as a prop or a strap that " +
+                "stands clear of the body. They are left out of every outfit."), true);
 
             EditorGUILayout.Space(2);
             foldResolver = EditorGUILayout.Foldout(foldResolver, "Resolver", true);
@@ -155,9 +159,10 @@ namespace FurGroomingTool
                     continue;
                 }
                 List<Renderer> cloth = FurOutfitBaker.CollectOutfit(root, bodyMesh);
+                int skipped = cloth.RemoveAll(excluded.Contains);
                 if (cloth.Count == 0)
                 {
-                    res.report = "No meshes found under this object.";
+                    res.report = skipped > 0 ? "Every mesh under this object is excluded." : "No meshes found under this object.";
                     continue;
                 }
 
@@ -165,7 +170,8 @@ namespace FurGroomingTool
                 string error = FurOutfitBaker.BakeMaps(bodyMesh, baseMaterial, cloth, root, occlusion,
                                                        normalProp, lengthProp, alphaProp, maxAngle, flipG, exportRes,
                                                        folder, b, ref res.material, out rep);
-                res.report = error ?? string.Format("{0} outfit mesh{1}.  {2}", cloth.Count, cloth.Count == 1 ? "" : "es", rep.Summary());
+                res.report = error ?? string.Format("{0} outfit mesh{1}{2}.  {3}", cloth.Count, cloth.Count == 1 ? "" : "es",
+                                                    skipped > 0 ? ", " + skipped + " excluded" : "", rep.Summary());
                 Debug.Log("[Fur] " + root.name + ": " + res.report, res.material);
                 if (rep != null && rep.canceled) break;
             }
@@ -214,6 +220,10 @@ namespace FurGroomingTool
                 made.Add(left); made.Add(right);
                 Sheet("Piece", 0f, 0.5f, -0.005f, made).transform.SetParent(left.transform, false);
                 Sheet("Piece", 0.5f, 1f, -0.005f, made).transform.SetParent(right.transform, false);
+                // Over the right half, but excluded, so the left outfit must still leave that half alone.
+                GameObject strap = Sheet("Strap", 0.5f, 1f, -0.005f, made);
+                strap.transform.SetParent(left.transform, false);
+                w.excluded = new List<Renderer> { strap.GetComponent<Renderer>() };
                 right.SetActive(false);   // an outfit toggled off still bakes, and stays off
                 w.outfits = new List<GameObject> { left, right, null, left };
 
@@ -227,6 +237,14 @@ namespace FurGroomingTool
                 check(mat.GetTexture("_MetallicGlossMap") == AssetDatabase.LoadAssetAtPath<Texture2D>(lenPath), "the base material was changed");
                 check(System.Linq.Enumerable.SequenceEqual(lenBefore, File.ReadAllBytes(lenPath)), "the base length map was changed");
                 check(!File.Exists(dir + "/Base_Left_Alpha.png"), "alpha should be off by default");
+
+                // The component's own list does the same for its one outfit.
+                var occ = left.AddComponent<FurOutfitOccluder>();
+                occ.furRenderer = w.bodyMesh;
+                occ.excluded = new List<Renderer> { strap.GetComponent<Renderer>() };
+                int skipped;
+                check(FurOutfitBaker.CollectOutfit(occ, out skipped).Count == 1 && skipped == 1,
+                      "the component should leave its excluded mesh out");
 
                 if (ml != null && mr != null)
                 {
